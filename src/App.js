@@ -272,6 +272,7 @@ const MicCheck = () => {
     }
   };
 
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
   const getAudioDevices = async () => {
     try {
