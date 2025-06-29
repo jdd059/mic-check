@@ -273,31 +273,31 @@ const MicCheck = () => {
   };
 
   useEffect(() => {
-    const getAudioDevices = async () => {
-      try {
-        const devices = await navigator.mediaDevices.enumerateDevices();
-        const audioInputs = devices.filter(device => device.kind === 'audioinput');
-        setAudioDevices(audioInputs);
-        if (audioInputs.length > 0 && !selectedAudioDevice) {
-          setSelectedAudioDevice(audioInputs[0].deviceId);
-        }
-      } catch (error) {
-        console.error('Error getting audio devices:', error);
+  const getAudioDevices = async () => {
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const audioInputs = devices.filter(device => device.kind === 'audioinput');
+      setAudioDevices(audioInputs);
+      if (audioInputs.length > 0 && !selectedAudioDevice) {
+        setSelectedAudioDevice(audioInputs[0].deviceId);
       }
-    };
+    } catch (error) {
+      console.error('Error getting audio devices:', error);
+    }
+  };
 
-    getAudioDevices();
-    navigator.mediaDevices.addEventListener('devicechange', getAudioDevices);
-    
-    return () => {
-      stopAudioAnalysis();
-      stopVideoAnalysis();
-      if (recordingTimerRef.current) {
-        clearInterval(recordingTimerRef.current);
-      }
-      navigator.mediaDevices.removeEventListener('devicechange', getAudioDevices);
-    };
-  }, []);
+  getAudioDevices();
+  navigator.mediaDevices.addEventListener('devicechange', getAudioDevices);
+  
+  return () => {
+    stopAudioAnalysis();
+    stopVideoAnalysis();
+    if (recordingTimerRef.current) {
+      clearInterval(recordingTimerRef.current);
+    }
+    navigator.mediaDevices.removeEventListener('devicechange', getAudioDevices);
+  };
+}, [selectedAudioDevice]);
 
   const levelHeight = Math.max(0, Math.min(100, (audioLevel + 60) * (100 / 60)));
   const peakColor = getLevelColor(peakLevel);
