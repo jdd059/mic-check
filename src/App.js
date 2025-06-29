@@ -1,5 +1,5 @@
-import React, { useState, useRef, useEffect } from 'react';
-import { Mic, MicOff, Play, Square, Download, Video, VideoOff } from 'lucide-react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
+import { Mic, MicOff, Play, Square, Download, Video, VideoOff, Mail } from 'lucide-react';
 
 const MicCheck = () => {
   const [isListening, setIsListening] = useState(false);
@@ -14,6 +14,8 @@ const MicCheck = () => {
   const [selectedAudioDevice, setSelectedAudioDevice] = useState('');
   const [isVideoEnabled, setIsVideoEnabled] = useState(false);
   const [videoFeedback, setVideoFeedback] = useState("Click 'Start Video' to check your camera");
+  const [email, setEmail] = useState('');
+  const [emailSubmitted, setEmailSubmitted] = useState(false);
 
   const audioContextRef = useRef(null);
   const analyserRef = useRef(null);
@@ -25,6 +27,7 @@ const MicCheck = () => {
   const videoStreamRef = useRef(null);
   const videoAnalysisRef = useRef(null);
   const peakHoldRef = useRef(null);
+  const actualPeakRef = useRef(-60);
 
   const getLevelColor = (level) => {
     if (level >= 0) return '#ef4444';
@@ -50,6 +53,10 @@ const MicCheck = () => {
 
   const startAudioAnalysis = async () => {
     try {
+      // Reset peak level when starting
+      setPeakLevel(-60);
+      actualPeakRef.current = -60;
+      
       const constraints = { 
         audio: { 
           echoCancellation: false,
@@ -69,8 +76,8 @@ const MicCheck = () => {
       const source = audioContextRef.current.createMediaStreamSource(stream);
       
       analyserRef.current = audioContextRef.current.createAnalyser();
-      analyserRef.current.fftSize = 512;
-      analyserRef.current.smoothingTimeConstant = 0.3;
+      analyserRef.current.fftSize = 2048;
+      analyserRef.current.smoothingTimeConstant = 0.8;
       
       source.connect(analyserRef.current);
       
@@ -88,16 +95,22 @@ const MicCheck = () => {
     const dataArray = new Uint8Array(analyserRef.current.frequencyBinCount);
     analyserRef.current.getByteFrequencyData(dataArray);
     
-    const sum = dataArray.reduce((acc, val) => acc + (val * val), 0);
+    // Calculate RMS for smoother level display
+    let sum = 0;
+    for (let i = 0; i < dataArray.length; i++) {
+      const normalized = dataArray[i] / 255;
+      sum += normalized * normalized;
+    }
     const rms = Math.sqrt(sum / dataArray.length);
-    const db = rms > 0 ? 20 * Math.log10(rms / 255) : -60;
+    const db = rms > 0 ? 20 * Math.log10(rms) : -60;
     const clampedDb = Math.max(db, -60);
     
     setAudioLevel(clampedDb);
     setFeedback(getFeedbackMessage(clampedDb));
     
-    // Peak detection with 2.8 second hold
-    if (clampedDb > peakLevel) {
+    // Peak detection with proper hold
+    if (clampedDb > actualPeakRef.current) {
+      actualPeakRef.current = clampedDb;
       setPeakLevel(clampedDb);
       
       // Clear previous peak hold timer
@@ -107,6 +120,7 @@ const MicCheck = () => {
       
       // Set new peak hold timer (2800ms = 2.8 seconds)
       peakHoldRef.current = setTimeout(() => {
+        actualPeakRef.current = -60;
         setPeakLevel(-60);
       }, 2800);
     }
@@ -114,7 +128,7 @@ const MicCheck = () => {
     animationFrameRef.current = requestAnimationFrame(analyzeAudio);
   };
 
-  const stopAudioAnalysis = () => {
+  const stopAudioAnalysis = useCallback(() => {
     if (animationFrameRef.current) {
       cancelAnimationFrame(animationFrameRef.current);
     }
@@ -127,28 +141,36 @@ const MicCheck = () => {
     setIsListening(false);
     setAudioLevel(-60);
     setPeakLevel(-60);
+    actualPeakRef.current = -60;
     if (peakHoldRef.current) {
       clearTimeout(peakHoldRef.current);
     }
     setFeedback("Click 'Start Audio Test' to check your microphone");
-  };
+  }, []);
 
   const startVideoAnalysis = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ 
         video: { 
-          width: { ideal: 640 },
-          height: { ideal: 480 }
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
         } 
       });
       
       videoStreamRef.current = stream;
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-      }
       
-      setIsVideoEnabled(true);
-      analyzeVideo();
+      // Wait for video ref to be available
+      const waitForVideo = () => {
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          setIsVideoEnabled(true);
+          setTimeout(() => analyzeVideo(), 500); // Give video time to start
+        } else {
+          setTimeout(waitForVideo, 100);
+        }
+      };
+      
+      waitForVideo();
     } catch (error) {
       console.error('Error accessing camera:', error);
       setVideoFeedback("❌ Couldn't access your camera. Please check permissions.");
@@ -156,9 +178,7 @@ const MicCheck = () => {
   };
 
   const analyzeVideo = () => {
-    if (!videoRef.current || !videoRef.current.srcObject) {
-      // Wait for video to be ready
-      setTimeout(analyzeVideo, 100);
+    if (!videoRef.current || !videoRef.current.srcObject || !isVideoEnabled) {
       return;
     }
     
@@ -192,10 +212,13 @@ const MicCheck = () => {
       console.error('Video analysis error:', error);
     }
     
-    videoAnalysisRef.current = requestAnimationFrame(analyzeVideo);
+    if (isVideoEnabled) {
+      videoAnalysisRef.current = requestAnimationFrame(analyzeVideo);
+    }
   };
 
-  const stopVideoAnalysis = () => {
+  const stopVideoAnalysis = useCallback(() => {
+    setIsVideoEnabled(false);
     if (videoAnalysisRef.current) {
       cancelAnimationFrame(videoAnalysisRef.current);
     }
@@ -205,9 +228,8 @@ const MicCheck = () => {
     if (videoRef.current) {
       videoRef.current.srcObject = null;
     }
-    setIsVideoEnabled(false);
     setVideoFeedback("Click 'Start Video' to check your camera");
-  };
+  }, []);
 
   const startRecording = async () => {
     if (!mediaStreamRef.current) {
@@ -282,6 +304,15 @@ const MicCheck = () => {
     }
   };
 
+  const handleEmailSubmit = (e) => {
+    e.preventDefault();
+    if (email) {
+      // Here you would normally send this to your backend
+      console.log('Email submitted:', email);
+      setEmailSubmitted(true);
+    }
+  };
+
   useEffect(() => {
     const getAudioDevices = async () => {
       try {
@@ -307,10 +338,9 @@ const MicCheck = () => {
       }
       navigator.mediaDevices.removeEventListener('devicechange', getAudioDevices);
     };
-  }, [selectedAudioDevice]);
+  }, [selectedAudioDevice, stopAudioAnalysis, stopVideoAnalysis]);
 
   const levelHeight = Math.max(0, Math.min(100, (audioLevel + 60) * (100 / 60)));
-  const peakColor = getLevelColor(peakLevel);
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 to-slate-800 text-white">
@@ -348,8 +378,11 @@ const MicCheck = () => {
                   Current: {audioLevel.toFixed(1)} dB
                 </span>
                 <span 
-                  className="px-2 py-1 rounded border border-slate-500 text-slate-300" 
-                  style={{ color: peakColor }}
+                  className="px-2 py-1 rounded border border-slate-500" 
+                  style={{ 
+                    color: getLevelColor(peakLevel),
+                    borderColor: getLevelColor(peakLevel)
+                  }}
                 >
                   Peak: {peakLevel.toFixed(1)} dB
                 </span>
@@ -357,6 +390,7 @@ const MicCheck = () => {
             </div>
             
             <div className="relative h-24 bg-slate-700 rounded-lg overflow-hidden">
+              {/* Background zones */}
               <div className="absolute inset-0 flex">
                 <div className="flex-1 bg-slate-600"></div>
                 <div className="w-1/3 bg-green-900/30"></div>
@@ -364,15 +398,18 @@ const MicCheck = () => {
                 <div className="w-4 bg-red-900/30"></div>
               </div>
               
+              {/* Dynamic level bar */}
               <div 
-                className="absolute bottom-0 left-0 transition-all duration-150 ease-out rounded-r"
+                className="absolute bottom-0 left-0 transition-all duration-75 ease-out rounded-r"
                 style={{
                   width: `${levelHeight}%`,
                   backgroundColor: getLevelColor(audioLevel),
-                  height: '100%'
+                  height: '100%',
+                  opacity: 0.9
                 }}
               />
               
+              {/* Zone markers */}
               <div className="absolute inset-0 flex items-center">
                 <div className="absolute left-[67%] h-full w-px bg-green-400/50"></div>
                 <div className="absolute left-[92%] h-full w-px bg-orange-400/50"></div>
@@ -380,11 +417,11 @@ const MicCheck = () => {
               </div>
             </div>
             
-            <div className="flex justify-between mt-2 text-xs text-slate-400">
-              <span>Too Quiet</span>
-              <span className="text-green-400">Perfect</span>
-              <span className="text-orange-400">Hot</span>
-              <span className="text-red-400">Clip</span>
+            <div className="relative mt-2">
+              <div className="absolute left-0 text-xs text-slate-400">Too Quiet</div>
+              <div className="absolute left-[67%] transform -translate-x-1/2 text-xs text-green-400">Perfect</div>
+              <div className="absolute left-[92%] transform -translate-x-1/2 text-xs text-orange-400">Hot</div>
+              <div className="absolute right-0 text-xs text-red-400">Clip</div>
             </div>
           </div>
 
@@ -492,7 +529,7 @@ const MicCheck = () => {
                   muted 
                   playsInline
                   className="w-full rounded-lg bg-slate-700"
-                  style={{ minHeight: '240px' }}
+                  style={{ minHeight: '240px', maxHeight: '360px' }}
                 />
                 
                 <div className="absolute inset-4 border-2 border-white/30 rounded-lg pointer-events-none"></div>
@@ -516,20 +553,6 @@ const MicCheck = () => {
         <div className="mt-8 space-y-4">
           <div className="flex flex-col sm:flex-row gap-4 justify-center">
             <a
-              href="#chrome-extension"
-              className="flex items-center justify-center gap-2 px-6 py-3 bg-white hover:bg-gray-100 text-gray-700 rounded-lg font-medium transition-colors shadow-md"
-            >
-              <svg width="20" height="20" viewBox="0 0 24 24">
-                <circle cx="12" cy="12" r="10" fill="#4285F4"/>
-                <path fill="#EA4335" d="M12 2C6.48 2 2 6.48 2 12h10V2z"/>
-                <path fill="#FBBC04" d="M22 12c0-5.52-4.48-10-10-10v10h10z"/>
-                <path fill="#34A853" d="M12 22c5.52 0 10-4.48 10-10H12v10z"/>
-                <circle cx="12" cy="12" r="4" fill="white"/>
-              </svg>
-              Get Chrome Extension
-            </a>
-
-            <a
               href="https://www.linkedin.com/in/jddeleon"
               target="_blank"
               rel="noopener noreferrer"
@@ -552,8 +575,29 @@ const MicCheck = () => {
               Get Quote
             </a>
           </div>
-          <div className="text-center">
-            <p className="text-xs text-slate-400">Chrome extension coming soon • Safari support planned</p>
+          
+          <div className="max-w-md mx-auto">
+            {!emailSubmitted ? (
+              <form onSubmit={handleEmailSubmit} className="flex gap-2">
+                <input
+                  type="email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="Get notified about Chrome extension"
+                  className="flex-1 px-4 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white placeholder-slate-400"
+                  required
+                />
+                <button
+                  type="submit"
+                  className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium transition-colors"
+                >
+                  <Mail size={16} />
+                  Notify Me
+                </button>
+              </form>
+            ) : (
+              <p className="text-center text-green-400">✓ We'll notify you when the Chrome extension launches!</p>
+            )}
           </div>
         </div>
 
