@@ -96,7 +96,7 @@ const MicCheck = () => {
     setAudioLevel(clampedDb);
     setFeedback(getFeedbackMessage(clampedDb));
     
-    // Peak detection with hold
+    // Peak detection with 2.8 second hold
     if (clampedDb > peakLevel) {
       setPeakLevel(clampedDb);
       
@@ -105,10 +105,10 @@ const MicCheck = () => {
         clearTimeout(peakHoldRef.current);
       }
       
-      // Set new peak hold timer (500ms)
+      // Set new peak hold timer (2800ms = 2.8 seconds)
       peakHoldRef.current = setTimeout(() => {
         setPeakLevel(-60);
-      }, 500);
+      }, 2800);
     }
     
     animationFrameRef.current = requestAnimationFrame(analyzeAudio);
@@ -156,7 +156,17 @@ const MicCheck = () => {
   };
 
   const analyzeVideo = () => {
-    if (!videoRef.current || videoRef.current.readyState < 2) return;
+    if (!videoRef.current || !videoRef.current.srcObject) {
+      // Wait for video to be ready
+      setTimeout(analyzeVideo, 100);
+      return;
+    }
+    
+    if (videoRef.current.readyState < 2) {
+      // Video not ready yet, try again
+      videoAnalysisRef.current = requestAnimationFrame(analyzeVideo);
+      return;
+    }
     
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d');
@@ -272,33 +282,32 @@ const MicCheck = () => {
     }
   };
 
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
-  const getAudioDevices = async () => {
-    try {
-      const devices = await navigator.mediaDevices.enumerateDevices();
-      const audioInputs = devices.filter(device => device.kind === 'audioinput');
-      setAudioDevices(audioInputs);
-      if (audioInputs.length > 0 && !selectedAudioDevice) {
-        setSelectedAudioDevice(audioInputs[0].deviceId);
+    const getAudioDevices = async () => {
+      try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const audioInputs = devices.filter(device => device.kind === 'audioinput');
+        setAudioDevices(audioInputs);
+        if (audioInputs.length > 0 && !selectedAudioDevice) {
+          setSelectedAudioDevice(audioInputs[0].deviceId);
+        }
+      } catch (error) {
+        console.error('Error getting audio devices:', error);
       }
-    } catch (error) {
-      console.error('Error getting audio devices:', error);
-    }
-  };
+    };
 
-  getAudioDevices();
-  navigator.mediaDevices.addEventListener('devicechange', getAudioDevices);
-  
-  return () => {
-    stopAudioAnalysis();
-    stopVideoAnalysis();
-    if (recordingTimerRef.current) {
-      clearInterval(recordingTimerRef.current);
-    }
-    navigator.mediaDevices.removeEventListener('devicechange', getAudioDevices);
-  };
-}, [selectedAudioDevice]);
+    getAudioDevices();
+    navigator.mediaDevices.addEventListener('devicechange', getAudioDevices);
+    
+    return () => {
+      stopAudioAnalysis();
+      stopVideoAnalysis();
+      if (recordingTimerRef.current) {
+        clearInterval(recordingTimerRef.current);
+      }
+      navigator.mediaDevices.removeEventListener('devicechange', getAudioDevices);
+    };
+  }, []);
 
   const levelHeight = Math.max(0, Math.min(100, (audioLevel + 60) * (100 / 60)));
   const peakColor = getLevelColor(peakLevel);
@@ -483,6 +492,7 @@ const MicCheck = () => {
                   muted 
                   playsInline
                   className="w-full rounded-lg bg-slate-700"
+                  style={{ minHeight: '240px' }}
                 />
                 
                 <div className="absolute inset-4 border-2 border-white/30 rounded-lg pointer-events-none"></div>
@@ -507,10 +517,14 @@ const MicCheck = () => {
           <div className="flex flex-col sm:flex-row gap-4 justify-center">
             <a
               href="#chrome-extension"
-              className="flex items-center justify-center gap-2 px-6 py-3 bg-[#4285F4] hover:bg-[#3367D6] text-white rounded-lg font-medium transition-colors"
+              className="flex items-center justify-center gap-2 px-6 py-3 bg-white hover:bg-gray-100 text-gray-700 rounded-lg font-medium transition-colors shadow-md"
             >
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M12 0C5.373 0 0 5.373 0 12s5.373 12 12 12 12-5.373 12-12S18.627 0 12 0zm5.568 7.178l-2.07 3.586A3.973 3.973 0 0012 9.5a3.973 3.973 0 00-3.498 1.264L6.432 7.178A7.916 7.916 0 0112 4.083a7.916 7.916 0 015.568 3.095zM4.083 12A7.916 7.916 0 017.178 6.432l2.07 3.586A3.973 3.973 0 008.5 12a3.973 3.973 0 00.748 2.018L7.178 17.568A7.916 7.916 0 014.083 12zm7.917 7.917a7.916 7.916 0 01-5.568-3.095l2.07-3.586A3.973 3.973 0 0012 14.5a3.973 3.973 0 003.498-1.264l2.07 3.586A7.916 7.916 0 0112 19.917z"/>
+              <svg width="20" height="20" viewBox="0 0 24 24">
+                <circle cx="12" cy="12" r="10" fill="#4285F4"/>
+                <path fill="#EA4335" d="M12 2C6.48 2 2 6.48 2 12h10V2z"/>
+                <path fill="#FBBC04" d="M22 12c0-5.52-4.48-10-10-10v10h10z"/>
+                <path fill="#34A853" d="M12 22c5.52 0 10-4.48 10-10H12v10z"/>
+                <circle cx="12" cy="12" r="4" fill="white"/>
               </svg>
               Get Chrome Extension
             </a>
