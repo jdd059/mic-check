@@ -32,15 +32,15 @@ const MicCheck = () => {
   const getLevelColor = (level) => {
     if (level >= 0) return '#ef4444';
     if (level >= -3) return '#f97316';
-    if (level >= -12) return '#22c55e';
+    if (level >= -18) return '#22c55e';
     return '#64748b';
   };
 
   const getFeedbackMessage = (level) => {
     if (level >= 0) return "🔴 Clipping detected! Lower your gain or back away from the mic";
     if (level >= -3) return "🟠 Getting hot - try lowering your gain a bit";
-    if (level >= -12) return "🟢 Perfect! You're ready to record";
-    if (level >= -24) return "🟡 A bit quiet - try getting closer to the mic or raising your gain";
+    if (level >= -18) return "🟢 Perfect! You're ready to record";
+    if (level >= -30) return "🟡 A bit quiet - try getting closer to the mic or raising your gain";
     return "🔇 Very quiet - check your mic connection and gain settings";
   };
 
@@ -150,30 +150,38 @@ const MicCheck = () => {
 
   const startVideoAnalysis = async () => {
     try {
+      console.log('Starting video analysis...');
       const stream = await navigator.mediaDevices.getUserMedia({ 
         video: { 
           width: { ideal: 1280 },
-          height: { ideal: 720 }
+          height: { ideal: 720 },
+          facingMode: 'user'
         } 
       });
       
+      console.log('Got video stream:', stream);
       videoStreamRef.current = stream;
       
-      // Wait for video ref to be available
-      const waitForVideo = () => {
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          setIsVideoEnabled(true);
-          setTimeout(() => analyzeVideo(), 500); // Give video time to start
-        } else {
-          setTimeout(waitForVideo, 100);
-        }
-      };
+      // Ensure video element exists and attach stream
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        videoRef.current.onloadedmetadata = () => {
+          console.log('Video metadata loaded');
+          videoRef.current.play();
+        };
+      }
       
-      waitForVideo();
+      setIsVideoEnabled(true);
+      
+      // Start analysis after a delay to ensure video is playing
+      setTimeout(() => {
+        console.log('Starting video analysis loop');
+        analyzeVideo();
+      }, 1000);
+      
     } catch (error) {
       console.error('Error accessing camera:', error);
-      setVideoFeedback("❌ Couldn't access your camera. Please check permissions.");
+      setVideoFeedback(`❌ Couldn't access your camera: ${error.message}`);
     }
   };
 
@@ -304,12 +312,24 @@ const MicCheck = () => {
     }
   };
 
-  const handleEmailSubmit = (e) => {
+  const handleEmailSubmit = async (e) => {
     e.preventDefault();
     if (email) {
-      // Here you would normally send this to your backend
-      console.log('Email submitted:', email);
-      setEmailSubmitted(true);
+      try {
+        // Here you would normally send this to your backend
+        // For now, we'll just store it in localStorage as a demo
+        const emails = JSON.parse(localStorage.getItem('micCheckEmails') || '[]');
+        emails.push({ email, date: new Date().toISOString() });
+        localStorage.setItem('micCheckEmails', JSON.stringify(emails));
+        
+        console.log('Email submitted:', email);
+        console.log('All emails:', emails);
+        
+        setEmailSubmitted(true);
+        setEmail('');
+      } catch (error) {
+        console.error('Error saving email:', error);
+      }
     }
   };
 
@@ -393,9 +413,9 @@ const MicCheck = () => {
               {/* Background zones */}
               <div className="absolute inset-0 flex">
                 <div className="flex-1 bg-slate-600"></div>
-                <div className="w-1/3 bg-green-900/30"></div>
-                <div className="w-8 bg-orange-900/30"></div>
-                <div className="w-4 bg-red-900/30"></div>
+                <div className="w-[30%] bg-green-900/30"></div>
+                <div className="w-[15%] bg-orange-900/30"></div>
+                <div className="w-[5%] bg-red-900/30"></div>
               </div>
               
               {/* Dynamic level bar */}
@@ -405,22 +425,23 @@ const MicCheck = () => {
                   width: `${levelHeight}%`,
                   backgroundColor: getLevelColor(audioLevel),
                   height: '100%',
-                  opacity: 0.9
+                  opacity: 0.9,
+                  mixBlendMode: 'screen'
                 }}
               />
               
               {/* Zone markers */}
               <div className="absolute inset-0 flex items-center">
-                <div className="absolute left-[67%] h-full w-px bg-green-400/50"></div>
-                <div className="absolute left-[92%] h-full w-px bg-orange-400/50"></div>
-                <div className="absolute right-0 h-full w-px bg-red-400/50"></div>
+                <div className="absolute left-[50%] h-full w-px bg-green-400/50"></div>
+                <div className="absolute left-[80%] h-full w-px bg-orange-400/50"></div>
+                <div className="absolute left-[95%] h-full w-px bg-red-400/50"></div>
               </div>
             </div>
             
             <div className="relative mt-2">
               <div className="absolute left-0 text-xs text-slate-400">Too Quiet</div>
-              <div className="absolute left-[67%] transform -translate-x-1/2 text-xs text-green-400">Perfect</div>
-              <div className="absolute left-[92%] transform -translate-x-1/2 text-xs text-orange-400">Hot</div>
+              <div className="absolute left-[50%] transform -translate-x-1/2 text-xs text-green-400">Perfect</div>
+              <div className="absolute left-[80%] transform -translate-x-1/2 text-xs text-orange-400">Hot</div>
               <div className="absolute right-0 text-xs text-red-400">Clip</div>
             </div>
           </div>
