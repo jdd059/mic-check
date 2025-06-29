@@ -307,7 +307,7 @@ const MicCheck = () => {
       }
       navigator.mediaDevices.removeEventListener('devicechange', getAudioDevices);
     };
-  }, []);
+  }, [selectedAudioDevice]);
 
   const levelHeight = Math.max(0, Math.min(100, (audioLevel + 60) * (100 / 60)));
   const peakColor = getLevelColor(peakLevel);
