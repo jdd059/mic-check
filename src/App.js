@@ -369,7 +369,7 @@ const MicCheck = () => {
 
   const displayLevel = usePeakForFill ? peakLevel : audioLevel;
   const levelWidth = Math.max(0, Math.min(100, (displayLevel + 60) * (100 / 60)));
-  const levelHeight = Math.max(0, Math.min(100, (audioLevel + 60) * (100 / 60)));
+
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 to-slate-800 text-white">
