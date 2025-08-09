@@ -220,6 +220,43 @@ const MicCheck = () => {
   }
 };
 
+function analyzeVideo() {
+  if (!videoRef.current || !videoRef.current.srcObject || !isVideoEnabled) return;
+
+  // Wait until the video element has enough data
+  if (videoRef.current.readyState < 2) {
+    videoAnalysisRef.current = requestAnimationFrame(analyzeVideo);
+    return;
+  }
+
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d');
+  canvas.width = 160;
+  canvas.height = 120;
+
+  try {
+    ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
+    const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+
+    let totalBrightness = 0;
+    for (let i = 0; i < data.length; i += 4) {
+      const r = data[i];
+      const g = data[i + 1];
+      const b = data[i + 2];
+      totalBrightness += (r + g + b) / 3;
+    }
+
+    const avgBrightness = totalBrightness / (data.length / 4);
+    setVideoFeedback(getVideoFeedback(avgBrightness, true));
+  } catch (error) {
+    console.error('Video analysis error:', error);
+  }
+
+  if (isVideoEnabled) {
+    videoAnalysisRef.current = requestAnimationFrame(analyzeVideo);
+  }
+}
+
 
   const stopVideoAnalysis = useCallback(() => {
     setIsVideoEnabled(false);
