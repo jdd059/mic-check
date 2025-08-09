@@ -180,67 +180,46 @@ const MicCheck = () => {
   }, []);
 
   const startVideoAnalysis = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' }
-      });
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'user' }
+    });
 
-      videoStreamRef.current = stream;
+    videoStreamRef.current = stream;
 
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        videoRef.current.onloadedmetadata = () => {
-          videoRef.current.play();
-        };
+    if (videoRef.current) {
+      const el = videoRef.current;
+      el.srcObject = stream;
+
+      // Make Chrome/Safari happy
+      el.setAttribute('playsinline', 'true');
+      el.muted = true;
+
+      // Try immediate play
+      try {
+        await el.play();
+      } catch (e) {
+        console.warn('video.play() blocked, retrying…', e);
+        requestAnimationFrame(async () => {
+          try { await el.play(); } catch (err) { console.warn('Retry play() failed', err); }
+        });
       }
 
-      setIsVideoEnabled(true);
-
-      setTimeout(() => {
-        analyzeVideo();
-      }, 1000);
-    } catch (error) {
-      console.error('Error accessing camera:', error);
-      setVideoFeedback(`❌ Couldn't access your camera: ${error.message}`);
-    }
-  };
-
-  const analyzeVideo = () => {
-    if (!videoRef.current || !videoRef.current.srcObject || !isVideoEnabled) return;
-
-    if (videoRef.current.readyState < 2) {
-      videoAnalysisRef.current = requestAnimationFrame(analyzeVideo);
-      return;
+      // Backup metadata handler
+      el.onloadedmetadata = async () => {
+        try { await el.play(); } catch {}
+      };
     }
 
-    const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d');
-    canvas.width = 160;
-    canvas.height = 120;
+    setIsVideoEnabled(true);
+    setTimeout(() => analyzeVideo(), 500);
 
-    try {
-      ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
-      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-      const data = imageData.data;
+  } catch (error) {
+    console.error('Error accessing camera:', error);
+    setVideoFeedback(`❌ Couldn't access your camera: ${error.message}`);
+  }
+};
 
-      let totalBrightness = 0;
-      for (let i = 0; i < data.length; i += 4) {
-        const r = data[i];
-        const g = data[i + 1];
-        const b = data[i + 2];
-        totalBrightness += (r + g + b) / 3;
-      }
-
-      const avgBrightness = totalBrightness / (data.length / 4);
-      setVideoFeedback(getVideoFeedback(avgBrightness, true));
-    } catch (error) {
-      console.error('Video analysis error:', error);
-    }
-
-    if (isVideoEnabled) {
-      videoAnalysisRef.current = requestAnimationFrame(analyzeVideo);
-    }
-  };
 
   const stopVideoAnalysis = useCallback(() => {
     setIsVideoEnabled(false);
@@ -565,9 +544,10 @@ const MicCheck = () => {
                   autoPlay
                   muted
                   playsInline
-                  className="w-full rounded-lg bg-slate-700"
-                  style={{ minHeight: '240px', maxHeight: '360px' }}
+                  className="w-full rounded-lg bg-slate-700 object-cover"
+                  style={{ minHeight: '240px', maxHeight: '360px', aspectRatio: '16 / 9' }}
                 />
+
                 <div className="absolute inset-4 border-2 border-white/30 rounded-lg pointer-events-none"></div>
               </div>
 
