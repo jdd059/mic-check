@@ -30,7 +30,6 @@ const MicCheck = () => {
   const videoRef = useRef(null);
   const videoStreamRef = useRef(null);
   const videoAnalysisRef = useRef(null);
-  const peakHoldRef = useRef(null);
   const actualPeakRef = useRef(-60);
 
   const getLevelColor = (level) => {
