@@ -18,7 +18,6 @@ const MicCheck = () => {
   const [emailSubmitted, setEmailSubmitted] = useState(false);
   const [usePeakForFill, setUsePeakForFill] = useState(true);
 
-
   const audioContextRef = useRef(null);
   const analyserRef = useRef(null);
   const mediaStreamRef = useRef(null);
@@ -58,36 +57,71 @@ const MicCheck = () => {
 
   const startAudioAnalysis = async () => {
     try {
-      // Reset peak level when starting
       setPeakLevel(-60);
       actualPeakRef.current = -60;
-      
-      const constraints = { 
-        audio: { 
+
+      const constraints = {
+        audio: {
           echoCancellation: false,
           noiseSuppression: false,
-          autoGainControl: false 
-        } 
+          autoGainControl: false
+        }
       };
-      
+
       if (selectedAudioDevice) {
         constraints.audio.deviceId = { exact: selectedAudioDevice };
       }
-      
+
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
-      
+
       mediaStreamRef.current = stream;
       audioContextRef.current = new AudioContext();
       await audioContextRef.current.resume();
       const source = audioContextRef.current.createMediaStreamSource(stream);
-      try { await audioContextRef.current.audioWorklet.addModule('/worklets/meter-processor.js'); workletNodeRef.current = new AudioWorkletNode(audioContextRef.current, 'meter-processor', { numberOfInputs: 1, numberOfOutputs: 0 }); source.connect(workletNodeRef.current); workletNodeRef.current.port.onmessage = (e) => { const { rmsDb, peakDb } = e.data; const floor = -60; const now = performance.now(); const dt = (now - (lastTsRef.current || now)) / 1000; lastTsRef.current = now; const releasePerSec = 90; const current = audioLevelRef.current ?? floor; const target = Math.max(rmsDb, floor); const next = target > current ? target : Math.max(target, current - releasePerSec * dt); audioLevelRef.current = next; setAudioLevel(next); const holdTime = 1500; const prev = peakHoldRef.current?.value ?? floor; const prevTs = peakHoldRef.current?.ts ?? 0; if (peakDb > prev || now - prevTs > holdTime) { peakHoldRef.current = { value: peakDb, ts: now }; } setPeakLevel(Math.max(peakHoldRef.current.value, floor)); }; } catch(err){ console.warn('AudioWorklet init failed', err); }
-      
+
+      try {
+        await audioContextRef.current.audioWorklet.addModule('/worklets/meter-processor.js');
+        workletNodeRef.current = new AudioWorkletNode(
+          audioContextRef.current,
+          'meter-processor',
+          { numberOfInputs: 1, numberOfOutputs: 0 }
+        );
+        source.connect(workletNodeRef.current);
+        workletNodeRef.current.port.onmessage = (e) => {
+          const { rmsDb, peakDb } = e.data;
+          const floor = -60;
+
+          const now = performance.now();
+          const dt = (now - (lastTsRef.current || now)) / 1000;
+          lastTsRef.current = now;
+
+          // Fast falloff for the bar when signal drops (feels responsive)
+          const releasePerSec = 90;
+          const current = audioLevelRef.current ?? floor;
+          const target = Math.max(rmsDb, floor);
+          const next = target > current ? target : Math.max(target, current - releasePerSec * dt);
+          audioLevelRef.current = next;
+          setAudioLevel(next);
+
+          // Peak hold (~1.5s)
+          const holdTime = 1500;
+          const prev = peakHoldRef.current?.value ?? floor;
+          const prevTs = peakHoldRef.current?.ts ?? 0;
+          if (peakDb > prev || now - prevTs > holdTime) {
+            peakHoldRef.current = { value: peakDb, ts: now };
+          }
+          setPeakLevel(Math.max(peakHoldRef.current.value, floor));
+        };
+      } catch (err) {
+        console.warn('AudioWorklet init failed', err);
+      }
+
       analyserRef.current = audioContextRef.current.createAnalyser();
       analyserRef.current.fftSize = 1024;
       analyserRef.current.smoothingTimeConstant = 0.0;
-      
+
       source.connect(analyserRef.current);
-      
+
       setIsListening(true);
       analyzeAudio();
     } catch (error) {
@@ -98,11 +132,10 @@ const MicCheck = () => {
 
   const analyzeAudio = () => {
     if (!analyserRef.current) return;
-    
+
     const dataArray = new Uint8Array(analyserRef.current.frequencyBinCount);
     analyserRef.current.getByteFrequencyData(dataArray);
-    
-    // Calculate RMS for smoother level display
+
     let sum = 0;
     for (let i = 0; i < dataArray.length; i++) {
       const normalized = dataArray[i] / 255;
@@ -111,37 +144,30 @@ const MicCheck = () => {
     const rms = Math.sqrt(sum / dataArray.length);
     const db = rms > 0 ? 20 * Math.log10(rms) : -60;
     const clampedDb = Math.max(db, -60);
-    
+
     setAudioLevel(clampedDb);
     setFeedback(getFeedbackMessage(clampedDb));
-    
-    // Peak detection with proper hold
+
+    // Peak w/ hold timer
     if (clampedDb > actualPeakRef.current) {
       actualPeakRef.current = clampedDb;
       setPeakLevel(clampedDb);
-      
-      // Clear previous peak hold timer
+
       if (peakHoldRef.current) {
         clearTimeout(peakHoldRef.current);
       }
-      
-      // Set new peak hold timer (2800ms = 2.8 seconds)
       peakHoldRef.current = setTimeout(() => {
         actualPeakRef.current = -60;
         setPeakLevel(-60);
       }, 2800);
     }
-    
+
     animationFrameRef.current = requestAnimationFrame(analyzeAudio);
   };
 
   const stopAudioAnalysis = useCallback(() => {
-    if (animationFrameRef.current) {
-      cancelAnimationFrame(animationFrameRef.current);
-    }
-    if (mediaStreamRef.current) {
-      mediaStreamRef.current.getTracks().forEach(track => track.stop());
-    }
+    if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
+    if (mediaStreamRef.current) mediaStreamRef.current.getTracks().forEach((t) => t.stop());
     if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
       audioContextRef.current.close();
     }
@@ -149,43 +175,30 @@ const MicCheck = () => {
     setAudioLevel(-60);
     setPeakLevel(-60);
     actualPeakRef.current = -60;
-    if (peakHoldRef.current) {
-      clearTimeout(peakHoldRef.current);
-    }
+    if (peakHoldRef.current) clearTimeout(peakHoldRef.current);
     setFeedback("Click 'Start Audio Test' to check your microphone");
   }, []);
 
   const startVideoAnalysis = async () => {
     try {
-      console.log('Starting video analysis...');
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        video: { 
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-          facingMode: 'user'
-        } 
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' }
       });
-      
-      console.log('Got video stream:', stream);
+
       videoStreamRef.current = stream;
-      
-      // Ensure video element exists and attach stream
+
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         videoRef.current.onloadedmetadata = () => {
-          console.log('Video metadata loaded');
           videoRef.current.play();
         };
       }
-      
+
       setIsVideoEnabled(true);
-      
-      // Start analysis after a delay to ensure video is playing
+
       setTimeout(() => {
-        console.log('Starting video analysis loop');
         analyzeVideo();
       }, 1000);
-      
     } catch (error) {
       console.error('Error accessing camera:', error);
       setVideoFeedback(`❌ Couldn't access your camera: ${error.message}`);
@@ -193,26 +206,23 @@ const MicCheck = () => {
   };
 
   const analyzeVideo = () => {
-    if (!videoRef.current || !videoRef.current.srcObject || !isVideoEnabled) {
-      return;
-    }
-    
+    if (!videoRef.current || !videoRef.current.srcObject || !isVideoEnabled) return;
+
     if (videoRef.current.readyState < 2) {
-      // Video not ready yet, try again
       videoAnalysisRef.current = requestAnimationFrame(analyzeVideo);
       return;
     }
-    
+
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d');
     canvas.width = 160;
     canvas.height = 120;
-    
+
     try {
       ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
       const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
       const data = imageData.data;
-      
+
       let totalBrightness = 0;
       for (let i = 0; i < data.length; i += 4) {
         const r = data[i];
@@ -220,13 +230,13 @@ const MicCheck = () => {
         const b = data[i + 2];
         totalBrightness += (r + g + b) / 3;
       }
-      
+
       const avgBrightness = totalBrightness / (data.length / 4);
       setVideoFeedback(getVideoFeedback(avgBrightness, true));
     } catch (error) {
       console.error('Video analysis error:', error);
     }
-    
+
     if (isVideoEnabled) {
       videoAnalysisRef.current = requestAnimationFrame(analyzeVideo);
     }
@@ -234,15 +244,9 @@ const MicCheck = () => {
 
   const stopVideoAnalysis = useCallback(() => {
     setIsVideoEnabled(false);
-    if (videoAnalysisRef.current) {
-      cancelAnimationFrame(videoAnalysisRef.current);
-    }
-    if (videoStreamRef.current) {
-      videoStreamRef.current.getTracks().forEach(track => track.stop());
-    }
-    if (videoRef.current) {
-      videoRef.current.srcObject = null;
-    }
+    if (videoAnalysisRef.current) cancelAnimationFrame(videoAnalysisRef.current);
+    if (videoStreamRef.current) videoStreamRef.current.getTracks().forEach((t) => t.stop());
+    if (videoRef.current) videoRef.current.srcObject = null;
     setVideoFeedback("Click 'Start Video' to check your camera");
   }, []);
 
@@ -250,30 +254,28 @@ const MicCheck = () => {
     if (!mediaStreamRef.current) {
       await startAudioAnalysis();
     }
-    
+
     try {
       mediaRecorderRef.current = new MediaRecorder(mediaStreamRef.current, {
         mimeType: 'audio/webm'
       });
-      
+
       const chunks = [];
       mediaRecorderRef.current.ondataavailable = (event) => {
-        if (event.data.size > 0) {
-          chunks.push(event.data);
-        }
+        if (event.data.size > 0) chunks.push(event.data);
       };
-      
+
       mediaRecorderRef.current.onstop = () => {
         const blob = new Blob(chunks, { type: 'audio/webm' });
         setRecordedBlob(blob);
       };
-      
+
       mediaRecorderRef.current.start();
       setIsRecording(true);
       setRecordingTime(0);
-      
+
       recordingTimerRef.current = setInterval(() => {
-        setRecordingTime(prev => {
+        setRecordingTime((prev) => {
           if (prev >= 4.9) {
             stopRecording();
             return 5;
@@ -281,20 +283,15 @@ const MicCheck = () => {
           return prev + 0.1;
         });
       }, 100);
-      
     } catch (error) {
       console.error('Error starting recording:', error);
-      setFeedback("❌ Recording failed. Please try again.");
+      setFeedback('❌ Recording failed. Please try again.');
     }
   };
 
   const stopRecording = () => {
-    if (mediaRecorderRef.current && isRecording) {
-      mediaRecorderRef.current.stop();
-    }
-    if (recordingTimerRef.current) {
-      clearInterval(recordingTimerRef.current);
-    }
+    if (mediaRecorderRef.current && isRecording) mediaRecorderRef.current.stop();
+    if (recordingTimerRef.current) clearInterval(recordingTimerRef.current);
     setIsRecording(false);
     setRecordingTime(0);
   };
@@ -323,15 +320,9 @@ const MicCheck = () => {
     e.preventDefault();
     if (email) {
       try {
-        // Here you would normally send this to your backend
-        // For now, we'll just store it in localStorage as a demo
         const emails = JSON.parse(localStorage.getItem('micCheckEmails') || '[]');
         emails.push({ email, date: new Date().toISOString() });
         localStorage.setItem('micCheckEmails', JSON.stringify(emails));
-        
-        console.log('Email submitted:', email);
-        console.log('All emails:', emails);
-        
         setEmailSubmitted(true);
         setEmail('');
       } catch (error) {
@@ -344,7 +335,7 @@ const MicCheck = () => {
     const getAudioDevices = async () => {
       try {
         const devices = await navigator.mediaDevices.enumerateDevices();
-        const audioInputs = devices.filter(device => device.kind === 'audioinput');
+        const audioInputs = devices.filter((d) => d.kind === 'audioinput');
         setAudioDevices(audioInputs);
         if (audioInputs.length > 0 && !selectedAudioDevice) {
           setSelectedAudioDevice(audioInputs[0].deviceId);
@@ -356,20 +347,17 @@ const MicCheck = () => {
 
     getAudioDevices();
     navigator.mediaDevices.addEventListener('devicechange', getAudioDevices);
-    
+
     return () => {
       stopAudioAnalysis();
       stopVideoAnalysis();
-      if (recordingTimerRef.current) {
-        clearInterval(recordingTimerRef.current);
-      }
+      if (recordingTimerRef.current) clearInterval(recordingTimerRef.current);
       navigator.mediaDevices.removeEventListener('devicechange', getAudioDevices);
     };
   }, [selectedAudioDevice, stopAudioAnalysis, stopVideoAnalysis]);
 
   const displayLevel = usePeakForFill ? peakLevel : audioLevel;
   const levelWidth = Math.max(0, Math.min(100, (displayLevel + 60) * (100 / 60)));
-
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 to-slate-800 text-white">
@@ -380,12 +368,11 @@ const MicCheck = () => {
         </div>
 
         <div className="bg-slate-800/50 backdrop-blur rounded-2xl p-8 border border-slate-700">
-          
           {audioDevices.length > 1 && (
             <div className="mb-6">
               <label className="block text-sm font-medium mb-2">Select Microphone</label>
-              <select 
-                value={selectedAudioDevice} 
+              <select
+                value={selectedAudioDevice}
                 onChange={(e) => setSelectedAudioDevice(e.target.value)}
                 className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white"
                 disabled={isListening}
@@ -398,51 +385,57 @@ const MicCheck = () => {
               </select>
             </div>
           )}
-          
+
           <div className="mb-8">
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-xl font-semibold">Audio Level</h2>
               <div className="flex items-center gap-3 text-xs">
-                <span className={`px-2 py-0.5 rounded-full font-medium select-none ${usePeakForFill ? "bg-green-900/40 text-green-300 border border-green-700/60" : "bg-slate-700/60 text-slate-200 border border-slate-500/60"}`}>
-                  {usePeakForFill ? "PEAK" : "RMS"}
+                <span
+                  className={`px-2 py-0.5 rounded-full font-medium select-none ${
+                    usePeakForFill
+                      ? 'bg-green-900/40 text-green-300 border border-green-700/60'
+                      : 'bg-slate-700/60 text-slate-200 border border-slate-500/60'
+                  }`}
+                >
+                  {usePeakForFill ? 'PEAK' : 'RMS'}
                 </span>
                 <span className="text-slate-400">Bar mode:</span>
                 <label className="inline-flex items-center gap-2 cursor-pointer">
-                  <input type="checkbox" checked={usePeakForFill} onChange={() => setUsePeakForFill(v => !v)} />
-                  <span className="select-none">{usePeakForFill ? "Peak" : "RMS"}</span>
+                  <input
+                    type="checkbox"
+                    checked={usePeakForFill}
+                    onChange={() => setUsePeakForFill((v) => !v)}
+                  />
+                  <span className="select-none">{usePeakForFill ? 'Peak' : 'RMS'}</span>
                 </label>
-              <span className={`ml-2 px-2 py-0.5 rounded-full text-xs font-medium ${usePeakForFill ? "bg-green-600 text-white" : "bg-gray-500 text-white"}`}>{usePeakForFill ? "PEAK" : "RMS"}</span>
               </div>
               <div className="flex gap-4 text-sm items-center">
-                <span className="text-slate-400">
-                  Current: {audioLevel.toFixed(1)} dB
-                </span>
-                <span 
-                  className="px-2 py-1 rounded border border-slate-500" 
-                  style={{ 
-                    color: getLevelColor(peakLevel),
-                    borderColor: getLevelColor(peakLevel)
-                  }}
+                <span className="text-slate-400">Current: {audioLevel.toFixed(1)} dB</span>
+                <span
+                  className="px-2 py-1 rounded border"
+                  style={{ color: getLevelColor(peakLevel), borderColor: getLevelColor(peakLevel) }}
                 >
                   Peak: {peakLevel.toFixed(1)} dB
                 </span>
-              <span className={`ml-2 px-2 py-0.5 rounded-full text-xs font-medium ${usePeakForFill ? "bg-green-600 text-white" : "bg-gray-500 text-white"}`}>{usePeakForFill ? "PEAK" : "RMS"}</span>
               </div>
             </div>
-            
+
             <div className="relative h-24 bg-slate-700 rounded-lg overflow-hidden">
-              {/* Background zones */}
-              <div className="absolute inset-0 flex">
-                <div className="flex-1 bg-slate-600"></div>
-                <div className="w-[30%] bg-green-900/30"></div>
-                <div className="w-[15%] bg-orange-900/30"></div>
-                <div className="w-[5%] bg-red-900/30"></div>
-              <span className={`ml-2 px-2 py-0.5 rounded-full text-xs font-medium ${usePeakForFill ? "bg-green-600 text-white" : "bg-gray-500 text-white"}`}>{usePeakForFill ? "PEAK" : "RMS"}</span>
+              {/* Background zones mapped to -60..0 dB */}
+              <div className="absolute inset-0">
+                {/* Quiet 0%→70% */}
+                <div className="absolute left-0 top-0 h-full" style={{ width: '70%', backgroundColor: '#556070' }} />
+                {/* Perfect -18→-9 dB = 70%→85% */}
+                <div className="absolute top-0 h-full" style={{ left: '70%', width: '15%', backgroundColor: 'rgba(16,185,129,0.20)' }} />
+                {/* Hot -9→-3 dB = 85%→95% */}
+                <div className="absolute top-0 h-full" style={{ left: '85%', width: '10%', backgroundColor: 'rgba(251,146,60,0.20)' }} />
+                {/* Clip -3→0 dB = 95%→100% */}
+                <div className="absolute top-0 h-full" style={{ left: '95%', width: '5%', backgroundColor: 'rgba(239,68,68,0.20)' }} />
               </div>
-              
+
               {/* Dynamic level bar */}
-              <div 
-                className="absolute bottom-0 left-0 transition-all duration-30 ease-out rounded-r"
+              <div
+                className="absolute bottom-0 left-0 transition-all duration-100 ease-out rounded-r"
                 style={{
                   width: `${levelWidth}%`,
                   backgroundColor: getLevelColor(displayLevel),
@@ -451,20 +444,20 @@ const MicCheck = () => {
                   mixBlendMode: 'screen'
                 }}
               />
-              
+
               {/* Zone markers */}
-              <div className="absolute inset-0 flex items-center">
-                <div className="absolute left-[50%] h-full w-px bg-green-400/50"></div>
-                <div className="absolute left-[80%] h-full w-px bg-orange-400/50"></div>
-                <div className="absolute left-[95%] h-full w-px bg-red-400/50"></div>
-              <span className={`ml-2 px-2 py-0.5 rounded-full text-xs font-medium ${usePeakForFill ? "bg-green-600 text-white" : "bg-gray-500 text-white"}`}>{usePeakForFill ? "PEAK" : "RMS"}</span>
+              <div className="absolute inset-0 pointer-events-none">
+                <div className="absolute left-[70%] top-0 h-full w-px bg-green-400/50"></div>
+                <div className="absolute left-[85%] top-0 h-full w-px bg-orange-400/50"></div>
+                <div className="absolute left-[95%] top-0 h-full w-px bg-red-400/50"></div>
               </div>
             </div>
-            
+
+            {/* Zone labels */}
             <div className="relative mt-2">
               <div className="absolute left-0 text-xs text-slate-400">Too Quiet</div>
-              <div className="absolute left-[50%] transform -translate-x-1/2 text-xs text-green-400">Perfect</div>
-              <div className="absolute left-[80%] transform -translate-x-1/2 text-xs text-orange-400">Hot</div>
+              <div className="absolute left-[77.5%] -translate-x-1/2 text-xs text-green-400">Perfect</div>
+              <div className="absolute left-[85%] -translate-x-1/2 text-xs text-orange-400">Hot</div>
               <div className="absolute right-0 text-xs text-red-400">Clip</div>
             </div>
           </div>
@@ -515,7 +508,7 @@ const MicCheck = () => {
             {isListening && (
               <div className="border-t border-slate-600 pt-6">
                 <h3 className="text-lg font-semibold mb-4 text-center">5-Second Sound Check</h3>
-                
+
                 <div className="flex gap-4 justify-center items-center">
                   {!isRecording ? (
                     <button
@@ -545,7 +538,7 @@ const MicCheck = () => {
                         <Play size={16} />
                         {isPlaying ? 'Playing...' : 'Play Test'}
                       </button>
-                      
+
                       <button
                         onClick={downloadRecording}
                         className="flex items-center gap-2 px-4 py-2 bg-slate-600 hover:bg-slate-700 text-white rounded-lg font-medium transition-colors"
@@ -555,9 +548,7 @@ const MicCheck = () => {
                       </button>
                     </>
                   )}
-                <span className={`ml-2 px-2 py-0.5 rounded-full text-xs font-medium ${usePeakForFill ? "bg-green-600 text-white" : "bg-gray-500 text-white"}`}>{usePeakForFill ? "PEAK" : "RMS"}</span>
-              </div>
-              <span className={`ml-2 px-2 py-0.5 rounded-full text-xs font-medium ${usePeakForFill ? "bg-green-600 text-white" : "bg-gray-500 text-white"}`}>{usePeakForFill ? "PEAK" : "RMS"}</span>
+                </div>
               </div>
             )}
           </div>
@@ -566,35 +557,30 @@ const MicCheck = () => {
         {isVideoEnabled && (
           <div className="mt-8 bg-slate-800/50 backdrop-blur rounded-2xl p-8 border border-slate-700">
             <h2 className="text-xl font-semibold mb-4">Video Check</h2>
-            
+
             <div className="grid md:grid-cols-2 gap-6">
               <div className="relative">
-                <video 
+                <video
                   ref={videoRef}
-                  autoPlay 
-                  muted 
+                  autoPlay
+                  muted
                   playsInline
                   className="w-full rounded-lg bg-slate-700"
                   style={{ minHeight: '240px', maxHeight: '360px' }}
                 />
-                
                 <div className="absolute inset-4 border-2 border-white/30 rounded-lg pointer-events-none"></div>
-              <span className={`ml-2 px-2 py-0.5 rounded-full text-xs font-medium ${usePeakForFill ? "bg-green-600 text-white" : "bg-gray-500 text-white"}`}>{usePeakForFill ? "PEAK" : "RMS"}</span>
               </div>
-              
+
               <div className="space-y-4">
                 <div className="p-4 bg-slate-700/50 rounded-lg">
                   <p className="text-lg">{videoFeedback}</p>
-                <span className={`ml-2 px-2 py-0.5 rounded-full text-xs font-medium ${usePeakForFill ? "bg-green-600 text-white" : "bg-gray-500 text-white"}`}>{usePeakForFill ? "PEAK" : "RMS"}</span>
-              </div>
-                
+                </div>
+
                 <div className="text-sm text-slate-300 space-y-2">
                   <div><strong className="text-white">Good framing:</strong> Eyes in upper third of frame</div>
                   <div><strong className="text-white">Lighting tips:</strong> Face a window or add soft front light</div>
                   <div><strong className="text-white">Distance:</strong> Arm's length from camera works best</div>
-                <span className={`ml-2 px-2 py-0.5 rounded-full text-xs font-medium ${usePeakForFill ? "bg-green-600 text-white" : "bg-gray-500 text-white"}`}>{usePeakForFill ? "PEAK" : "RMS"}</span>
-              </div>
-              <span className={`ml-2 px-2 py-0.5 rounded-full text-xs font-medium ${usePeakForFill ? "bg-green-600 text-white" : "bg-gray-500 text-white"}`}>{usePeakForFill ? "PEAK" : "RMS"}</span>
+                </div>
               </div>
             </div>
           </div>
@@ -613,7 +599,7 @@ const MicCheck = () => {
               </svg>
               Connect on LinkedIn
             </a>
-            
+
             <a
               href="mailto:jon@jondeleonmedia.com?subject=Audio%20Production%20Quote"
               className="flex items-center justify-center gap-2 px-6 py-3 bg-[#3251D5] hover:bg-[#2940b8] text-white rounded-lg font-medium transition-colors"
@@ -625,7 +611,7 @@ const MicCheck = () => {
               Get Quote
             </a>
           </div>
-          
+
           <div className="max-w-md mx-auto">
             {!emailSubmitted ? (
               <form onSubmit={handleEmailSubmit} className="flex gap-2">
@@ -676,7 +662,13 @@ const MicCheck = () => {
         <div className="text-center mt-8 text-slate-400 text-sm leading-6">
           <div>Professional audio tools built for creators</div>
           <div>
-            by <a href="https://jondeleonmedia.com" target="_blank" rel="noopener noreferrer" className="text-[#3251D5] hover:text-[#2940b8]">
+            by{' '}
+            <a
+              href="https://jondeleonmedia.com"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-[#3251D5] hover:text-[#2940b8]"
+            >
               Jon DeLeon Media
             </a>
           </div>
