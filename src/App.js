@@ -16,6 +16,8 @@ const MicCheck = () => {
   const [videoFeedback, setVideoFeedback] = useState("Click 'Start Video' to check your camera");
   const [email, setEmail] = useState('');
   const [emailSubmitted, setEmailSubmitted] = useState(false);
+  const [usePeakForFill, setUsePeakForFill] = useState(true);
+
 
   const audioContextRef = useRef(null);
   const analyserRef = useRef(null);
