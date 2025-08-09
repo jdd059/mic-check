@@ -20,6 +20,10 @@ const MicCheck = () => {
   const audioContextRef = useRef(null);
   const analyserRef = useRef(null);
   const mediaStreamRef = useRef(null);
+  const lastTsRef = useRef(null);
+  const audioLevelRef = useRef(-60);
+  const workletNodeRef = useRef(null);
+  const peakHoldRef = useRef({ value: -60, ts: 0 });
   const mediaRecorderRef = useRef(null);
   const animationFrameRef = useRef(null);
   const recordingTimerRef = useRef(null);
@@ -73,11 +77,13 @@ const MicCheck = () => {
       
       mediaStreamRef.current = stream;
       audioContextRef.current = new AudioContext();
+      await audioContextRef.current.resume();
       const source = audioContextRef.current.createMediaStreamSource(stream);
+      try { await audioContextRef.current.audioWorklet.addModule('/worklets/meter-processor.js'); workletNodeRef.current = new AudioWorkletNode(audioContextRef.current, 'meter-processor', { numberOfInputs: 1, numberOfOutputs: 0 }); source.connect(workletNodeRef.current); workletNodeRef.current.port.onmessage = (e) => { const { rmsDb, peakDb } = e.data; const floor = -60; const now = performance.now(); const dt = (now - (lastTsRef.current || now)) / 1000; lastTsRef.current = now; const releasePerSec = 90; const current = audioLevelRef.current ?? floor; const target = Math.max(rmsDb, floor); const next = target > current ? target : Math.max(target, current - releasePerSec * dt); audioLevelRef.current = next; setAudioLevel(next); const holdTime = 1500; const prev = peakHoldRef.current?.value ?? floor; const prevTs = peakHoldRef.current?.ts ?? 0; if (peakDb > prev || now - prevTs > holdTime) { peakHoldRef.current = { value: peakDb, ts: now }; } setPeakLevel(Math.max(peakHoldRef.current.value, floor)); }; } catch(err){ console.warn('AudioWorklet init failed', err); }
       
       analyserRef.current = audioContextRef.current.createAnalyser();
-      analyserRef.current.fftSize = 2048;
-      analyserRef.current.smoothingTimeConstant = 0.8;
+      analyserRef.current.fftSize = 1024;
+      analyserRef.current.smoothingTimeConstant = 0.0;
       
       source.connect(analyserRef.current);
       
@@ -360,6 +366,8 @@ const MicCheck = () => {
     };
   }, [selectedAudioDevice, stopAudioAnalysis, stopVideoAnalysis]);
 
+  const displayLevel = usePeakForFill ? peakLevel : audioLevel;
+  const levelWidth = Math.max(0, Math.min(100, (displayLevel + 60) * (100 / 60)));
   const levelHeight = Math.max(0, Math.min(100, (audioLevel + 60) * (100 / 60)));
 
   return (
@@ -393,6 +401,17 @@ const MicCheck = () => {
           <div className="mb-8">
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-xl font-semibold">Audio Level</h2>
+              <div className="flex items-center gap-3 text-xs">
+                <span className={`px-2 py-0.5 rounded-full font-medium select-none ${usePeakForFill ? "bg-green-900/40 text-green-300 border border-green-700/60" : "bg-slate-700/60 text-slate-200 border border-slate-500/60"}`}>
+                  {usePeakForFill ? "PEAK" : "RMS"}
+                </span>
+                <span className="text-slate-400">Bar mode:</span>
+                <label className="inline-flex items-center gap-2 cursor-pointer">
+                  <input type="checkbox" checked={usePeakForFill} onChange={() => setUsePeakForFill(v => !v)} />
+                  <span className="select-none">{usePeakForFill ? "Peak" : "RMS"}</span>
+                </label>
+              <span className={`ml-2 px-2 py-0.5 rounded-full text-xs font-medium ${usePeakForFill ? "bg-green-600 text-white" : "bg-gray-500 text-white"}`}>{usePeakForFill ? "PEAK" : "RMS"}</span>
+              </div>
               <div className="flex gap-4 text-sm items-center">
                 <span className="text-slate-400">
                   Current: {audioLevel.toFixed(1)} dB
@@ -406,6 +425,7 @@ const MicCheck = () => {
                 >
                   Peak: {peakLevel.toFixed(1)} dB
                 </span>
+              <span className={`ml-2 px-2 py-0.5 rounded-full text-xs font-medium ${usePeakForFill ? "bg-green-600 text-white" : "bg-gray-500 text-white"}`}>{usePeakForFill ? "PEAK" : "RMS"}</span>
               </div>
             </div>
             
@@ -416,14 +436,15 @@ const MicCheck = () => {
                 <div className="w-[30%] bg-green-900/30"></div>
                 <div className="w-[15%] bg-orange-900/30"></div>
                 <div className="w-[5%] bg-red-900/30"></div>
+              <span className={`ml-2 px-2 py-0.5 rounded-full text-xs font-medium ${usePeakForFill ? "bg-green-600 text-white" : "bg-gray-500 text-white"}`}>{usePeakForFill ? "PEAK" : "RMS"}</span>
               </div>
               
               {/* Dynamic level bar */}
               <div 
-                className="absolute bottom-0 left-0 transition-all duration-75 ease-out rounded-r"
+                className="absolute bottom-0 left-0 transition-all duration-30 ease-out rounded-r"
                 style={{
-                  width: `${levelHeight}%`,
-                  backgroundColor: getLevelColor(audioLevel),
+                  width: `${levelWidth}%`,
+                  backgroundColor: getLevelColor(displayLevel),
                   height: '100%',
                   opacity: 0.9,
                   mixBlendMode: 'screen'
@@ -435,6 +456,7 @@ const MicCheck = () => {
                 <div className="absolute left-[50%] h-full w-px bg-green-400/50"></div>
                 <div className="absolute left-[80%] h-full w-px bg-orange-400/50"></div>
                 <div className="absolute left-[95%] h-full w-px bg-red-400/50"></div>
+              <span className={`ml-2 px-2 py-0.5 rounded-full text-xs font-medium ${usePeakForFill ? "bg-green-600 text-white" : "bg-gray-500 text-white"}`}>{usePeakForFill ? "PEAK" : "RMS"}</span>
               </div>
             </div>
             
@@ -532,7 +554,9 @@ const MicCheck = () => {
                       </button>
                     </>
                   )}
-                </div>
+                <span className={`ml-2 px-2 py-0.5 rounded-full text-xs font-medium ${usePeakForFill ? "bg-green-600 text-white" : "bg-gray-500 text-white"}`}>{usePeakForFill ? "PEAK" : "RMS"}</span>
+              </div>
+              <span className={`ml-2 px-2 py-0.5 rounded-full text-xs font-medium ${usePeakForFill ? "bg-green-600 text-white" : "bg-gray-500 text-white"}`}>{usePeakForFill ? "PEAK" : "RMS"}</span>
               </div>
             )}
           </div>
@@ -554,18 +578,22 @@ const MicCheck = () => {
                 />
                 
                 <div className="absolute inset-4 border-2 border-white/30 rounded-lg pointer-events-none"></div>
+              <span className={`ml-2 px-2 py-0.5 rounded-full text-xs font-medium ${usePeakForFill ? "bg-green-600 text-white" : "bg-gray-500 text-white"}`}>{usePeakForFill ? "PEAK" : "RMS"}</span>
               </div>
               
               <div className="space-y-4">
                 <div className="p-4 bg-slate-700/50 rounded-lg">
                   <p className="text-lg">{videoFeedback}</p>
-                </div>
+                <span className={`ml-2 px-2 py-0.5 rounded-full text-xs font-medium ${usePeakForFill ? "bg-green-600 text-white" : "bg-gray-500 text-white"}`}>{usePeakForFill ? "PEAK" : "RMS"}</span>
+              </div>
                 
                 <div className="text-sm text-slate-300 space-y-2">
                   <div><strong className="text-white">Good framing:</strong> Eyes in upper third of frame</div>
                   <div><strong className="text-white">Lighting tips:</strong> Face a window or add soft front light</div>
                   <div><strong className="text-white">Distance:</strong> Arm's length from camera works best</div>
-                </div>
+                <span className={`ml-2 px-2 py-0.5 rounded-full text-xs font-medium ${usePeakForFill ? "bg-green-600 text-white" : "bg-gray-500 text-white"}`}>{usePeakForFill ? "PEAK" : "RMS"}</span>
+              </div>
+              <span className={`ml-2 px-2 py-0.5 rounded-full text-xs font-medium ${usePeakForFill ? "bg-green-600 text-white" : "bg-gray-500 text-white"}`}>{usePeakForFill ? "PEAK" : "RMS"}</span>
               </div>
             </div>
           </div>
