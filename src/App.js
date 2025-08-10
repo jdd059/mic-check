@@ -24,7 +24,8 @@ const MicCheck = () => {
   const lastTsRef = useRef(null);
   const audioLevelRef = useRef(-60);
   const workletNodeRef = useRef(null);
-  const peakHoldRef = useRef({ value: -60, ts: 0 });
+  const peakHoldStateRef = useRef({ value: -60, ts: 0 });
+  const peakHoldTimerRef = useRef(null);
   const mediaRecorderRef = useRef(null);
   const animationFrameRef = useRef(null);
   const recordingTimerRef = useRef(null);
@@ -104,13 +105,15 @@ const MicCheck = () => {
           setAudioLevel(next);
 
           // Peak hold (~1.5s)
-          const holdTime = 1500;
-          const prev = peakHoldRef.current?.value ?? floor;
-          const prevTs = peakHoldRef.current?.ts ?? 0;
-          if (peakDb > prev || now - prevTs > holdTime) {
-            peakHoldRef.current = { value: peakDb, ts: now };
-          }
-          setPeakLevel(Math.max(peakHoldRef.current.value, floor));
+          // Peak hold (~1.5s)
+            const holdTime = 1500;
+            const prev = peakHoldStateRef.current?.value ?? floor;
+            const prevTs = peakHoldStateRef.current?.ts ?? 0;
+            if (peakDb > prev || now - prevTs > holdTime) {
+              peakHoldStateRef.current = { value: peakDb, ts: now };
+            }
+            setPeakLevel(Math.max(peakHoldStateRef.current.value, floor));
+
         };
       } catch (err) {
         console.warn('AudioWorklet init failed', err);
@@ -148,36 +151,60 @@ const MicCheck = () => {
     setAudioLevel(clampedDb);
     setFeedback(getFeedbackMessage(clampedDb));
 
-    // Peak w/ hold timer
-    if (clampedDb > actualPeakRef.current) {
-      actualPeakRef.current = clampedDb;
-      setPeakLevel(clampedDb);
+    // Peak w/ hold timer (decay after 2.8s)
+        if (clampedDb > actualPeakRef.current) {
+          actualPeakRef.current = clampedDb;
+          setPeakLevel(clampedDb);
 
-      if (peakHoldRef.current) {
-        clearTimeout(peakHoldRef.current);
-      }
-      peakHoldRef.current = setTimeout(() => {
-        actualPeakRef.current = -60;
-        setPeakLevel(-60);
-      }, 2800);
-    }
+          if (peakHoldTimerRef.current) clearTimeout(peakHoldTimerRef.current);
+          peakHoldTimerRef.current = setTimeout(() => {
+            actualPeakRef.current = -60;
+            setPeakLevel(-60);
+            peakHoldTimerRef.current = null;
+          }, 2800);
+        }
+
 
     animationFrameRef.current = requestAnimationFrame(analyzeAudio);
   };
 
   const stopAudioAnalysis = useCallback(() => {
-    if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
-    if (mediaStreamRef.current) mediaStreamRef.current.getTracks().forEach((t) => t.stop());
-    if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
-      audioContextRef.current.close();
+        if (animationFrameRef.current) {
+      cancelAnimationFrame(animationFrameRef.current);
+      animationFrameRef.current = null;
     }
+
+    // disconnect worklet
+    if (workletNodeRef.current) {
+      try {
+        workletNodeRef.current.port.onmessage = null;
+        workletNodeRef.current.disconnect();
+      } catch {}
+      workletNodeRef.current = null;
+    }
+
+    // stop tracks and drop the stream
+    if (mediaStreamRef.current) {
+      mediaStreamRef.current.getTracks().forEach(t => t.stop());
+      mediaStreamRef.current = null;
+    }
+
+    if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
+      try { audioContextRef.current.close(); } catch {}
+      audioContextRef.current = null;
+    }
+
+    if (peakHoldTimerRef.current) {
+      clearTimeout(peakHoldTimerRef.current);
+      peakHoldTimerRef.current = null;
+    }
+
     setIsListening(false);
     setAudioLevel(-60);
     setPeakLevel(-60);
     actualPeakRef.current = -60;
-    if (peakHoldRef.current) clearTimeout(peakHoldRef.current);
     setFeedback("Click 'Start Audio Test' to check your microphone");
-  }, []);
+
 
   const startVideoAnalysis = async () => {
   try {
@@ -284,6 +311,7 @@ function analyzeVideo() {
       mediaRecorderRef.current.onstop = () => {
         const blob = new Blob(chunks, { type: 'audio/webm' });
         setRecordedBlob(blob);
+        mediaRecorderRef.current = null;
       };
 
       mediaRecorderRef.current.start();
