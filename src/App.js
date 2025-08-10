@@ -1,92 +1,152 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { Mic, MicOff, Video, VideoOff, Play, Square, Download, Circle, Mail } from 'lucide-react';
 
-/** ======= Vertical segmented meter (Logic-ish) with labels & ruler ======= */
-function VerticalMeter({ rmsDb, peakDb }) {
-  // Map -60..0 dB to 0..1
-  const norm = (db) => Math.max(0, Math.min(1, (db + 60) / 60));
-  const litFrac = norm(rmsDb);
-  const peakFrac = norm(peakDb);
+/** ======= Horizontal smooth meter with easing + decay tail (-24→-3 sweet spot) ======= */
+function HorizontalMeter({ rmsDb, peakDb }) {
+  const norm = (db) => Math.max(0, Math.min(1, (db + 60) / 60)); // -60..0 dBFS -> 0..1
 
-  // Segments: 30 rows => 2 dB per segment from -60 .. 0
-  const segments = 30;
-  const dbPerSeg = 60 / segments; // 2
-  // For each segment i (0 bottom .. 29 top)
-  const segs = Array.from({ length: segments }, (_, i) => {
-    const fracFromBottom = (i + 1) / segments;        // 0..1
-    const dbTop = -60 + fracFromBottom * 60;          // top edge dB for this segment
-    const isLit = fracFromBottom <= litFrac + 1e-6;
+  const targetRmsPct = norm(rmsDb) * 100;
+  const peakPct = norm(peakDb) * 100;
 
-    // Colors similar to Logic bands
-    let color = '#4ade80'; // green
-    if (dbTop < -18) color = '#64748b'; // low range
-    if (dbTop >= -3) color = '#f59e0b'; // amber near top
+  // Visual smoothing state
+  const [dispPct, setDispPct] = useState(0);  // displayed RMS %
+  const [tailPct, setTailPct] = useState(0);  // afterglow tail %
+  const rafRef = useRef(null);
+  const lastTsRef = useRef(null);
 
-    return { isLit, color, dbTop: Math.round(dbTop) };
-  });
+  // Easing loop: fast attack, slower release; tail decays even slower.
+  useEffect(() => {
+    const ATTACK_PER_SEC = 12;   // how quickly fill chases rising signal
+    const RELEASE_PER_SEC = 4;   // how quickly fill falls on decreasing signal
+    const TAIL_RELEASE_PER_SEC = 2; // how quickly the tail falls
 
-  // Peak marker position
-  const peakY = (1 - peakFrac) * 100;
+    const step = (ts) => {
+      const last = lastTsRef.current ?? ts;
+      const dt = Math.min(0.05, (ts - last) / 1000); // cap dt at 50ms for stability
+      lastTsRef.current = ts;
 
-  // Right-side ruler ticks
-  const majorTicks = [-60, -48, -36, -24, -18, -12, -6, -3, 0];
+      setDispPct((prev) => {
+        const rising = targetRmsPct > prev;
+        const rate = rising ? ATTACK_PER_SEC : RELEASE_PER_SEC;
+        const alpha = 1 - Math.exp(-rate * dt);
+        const next = prev + (targetRmsPct - prev) * alpha;
+        return next;
+      });
+
+      setTailPct((prevTail) => {
+        // Tail always at least the displayed value, and decays slowly when above it
+        const minTail = Math.max(prevTail, targetRmsPct);
+        const above = minTail > dispPct;
+        if (!above) return dispPct;
+        const alphaTail = 1 - Math.exp(-TAIL_RELEASE_PER_SEC * dt);
+        const nextTail = minTail - (minTail - dispPct) * alphaTail;
+        return nextTail;
+      });
+
+      rafRef.current = requestAnimationFrame(step);
+    };
+
+    rafRef.current = requestAnimationFrame(step);
+    return () => {
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+      lastTsRef.current = null;
+    };
+  }, [targetRmsPct, dispPct]);
+
+  // color logic matching widened sweet spot
+  const fillColor = (db) => {
+    if (db >= 0) return '#ef4444';
+    if (db >= -3) return '#f59e0b';
+    if (db >= -24) return '#22c55e';
+    return 'rgba(100,116,139,0.85)';
+  };
+
+  const bgZones = [
+    { from: -60, to: -24, color: 'rgba(100,116,139,0.20)' }, // quiet
+    { from: -24, to: -3,  color: 'rgba(34,197,94,0.18)'  },  // sweet spot
+    { from: -3,  to: 0,   color: 'rgba(245,158,11,0.18)' },  // hot
+  ];
+
+  const ticks = [-60, -48, -36, -30, -24, -18, -12, -6, -3, 0];
+  const special = new Set([-24, -3, 0]);
 
   return (
-    <div className="inline-flex items-stretch select-none">
-      {/* Meter body */}
-      <div className="relative h-64 w-10 rounded-md bg-slate-800 border border-slate-700 overflow-hidden">
-        {/* segments */}
-        <div className="absolute inset-1 grid" style={{ gridTemplateRows: `repeat(${segments}, 1fr)` }}>
-          {segs.map((s, i) => (
-            <div key={i} className="relative mx-0.5 my-[1px] rounded-sm"
-                 style={{
-                   backgroundColor: s.isLit ? s.color : 'rgba(100,116,139,0.25)',
-                   boxShadow: s.isLit ? 'inset 0 0 0 1px rgba(255,255,255,0.08)' : 'none'
-                 }}>
-              {/* per-segment dB label (tiny, faint) */}
-              <div className="absolute left-0.5 top-1/2 -translate-y-1/2 text-[9px] leading-none text-slate-300/40">
-                {s.dbTop}
-              </div>
-            </div>
-          ))}
-        </div>
-
-        {/* peak-hold marker */}
-        <div className="absolute left-0 right-0 h-[2px] bg-white/70"
-             style={{ top: `calc(${peakY}% - 1px)` }} />
-
-        {/* clip LED at top */}
-        <div className="absolute left-1 right-1 top-1 h-1.5 rounded-sm"
-             style={{ backgroundColor: peakDb >= 0 ? '#ef4444' : 'rgba(100,116,139,0.35)' }} />
-      </div>
-
-      {/* Right ruler */}
-      <div className="relative h-64 w-10 ml-2">
-        {/* vertical spine */}
-        <div className="absolute left-1/2 -translate-x-1/2 top-0 bottom-0 w-px bg-slate-600/60" />
-        {majorTicks.map((db) => {
-          const y = (1 - norm(db)) * 100;
-          const isSpecial = db === -3 || db === 0;
+    <div className="w-full">
+      {/* ruler above */}
+      <div className="relative h-6 mb-1">
+        <div className="absolute left-0 right-0 top-1/2 -translate-y-1/2 h-px bg-slate-600/60" />
+        {ticks.map((db) => {
+          const x = norm(db) * 100;
+          const isMajor = db % 12 === 0 || special.has(db);
+          const labelUp = special.has(db);
           return (
-            <div key={db} className="absolute left-0 right-0"
-                 style={{ top: `calc(${y}% - 8px)` }}>
-              {/* tick line */}
-              <div className="absolute left-1/2 -translate-x-1/2 h-[1px] w-5 bg-slate-400/70" />
-              {/* label */}
-              <div className={`absolute left-[60%] -translate-x-0 text-[11px] leading-none
-                               ${isSpecial ? 'text-white' : 'text-slate-300/80'}`}>
+            <div key={db} className="absolute" style={{ left: `calc(${x}% - 1px)`, top: 0 }}>
+              <div
+                className="bg-slate-400/80"
+                style={{ width: isMajor ? 2 : 1, height: isMajor ? 12 : 8, marginLeft: -1 }}
+              />
+              <div
+                className={`absolute ${labelUp ? '-top-4' : 'top-4'} -translate-x-1/2 text-[11px] leading-none ${
+                  special.has(db) ? 'text-white font-medium' : 'text-slate-300/80'
+                }`}
+                style={{ whiteSpace: 'nowrap' }}
+              >
                 {db}
               </div>
             </div>
           );
         })}
-        {/* axis labels */}
-        <div className="absolute bottom-0 left-0 right-0 text-center text-[10px] text-slate-400/70">dBFS</div>
+        <div className="absolute right-0 -top-4 text-[10px] text-slate-400/70">dBFS</div>
+      </div>
+
+      {/* meter bar */}
+      <div className="relative h-7 rounded-md bg-slate-800 border border-slate-700 overflow-hidden">
+        {bgZones.map((z, i) => {
+          const left = norm(z.from) * 100;
+          const width = (norm(z.to) - norm(z.from)) * 100;
+          return (
+            <div
+              key={i}
+              className="absolute top-0 bottom-0"
+              style={{ left: `${left}%`, width: `${width}%`, backgroundColor: z.color }}
+            />
+          );
+        })}
+
+        {/* afterglow tail (thin, slightly brighter) */}
+        <div
+          className="absolute inset-y-0 left-0"
+          style={{
+            width: `${Math.max(dispPct, tailPct)}%`,
+            background: 'linear-gradient(90deg, rgba(255,255,255,0.08), rgba(255,255,255,0.18))',
+            opacity: 0.55,
+            mixBlendMode: 'screen'
+          }}
+        />
+
+        {/* smooth fill (color from current dB) */}
+        <div
+          className="absolute inset-y-0 left-0"
+          style={{ width: `${dispPct}%`, backgroundColor: fillColor(rmsDb) }}
+        />
+
+        {/* peak marker */}
+        <div
+          className="absolute top-0 bottom-0 w-[2px] bg-white/85"
+          style={{ left: `calc(${peakPct}% - 1px)` }}
+        />
+
+        {/* clip LED */}
+        <div
+          className="absolute right-1 top-1/2 -translate-y-1/2 h-3 w-3 rounded-full"
+          style={{ backgroundColor: peakDb >= 0 ? '#ef4444' : 'rgba(100,116,139,0.45)' }}
+          title="Clip"
+        />
       </div>
     </div>
   );
 }
-ç
 
 const MicCheck = () => {
   // ---------- State ----------
@@ -101,7 +161,7 @@ const MicCheck = () => {
   const [isVideoEnabled, setIsVideoEnabled] = useState(false);
   const [videoFeedback, setVideoFeedback] = useState("Click 'Start Video' to check your camera");
   const [hasVideoFrame, setHasVideoFrame] = useState(false);
-  const [usePeakForFill, setUsePeakForFill] = useState(true);
+  const [usePeakForFill, setUsePeakForFill] = useState(true); // label toggle only
 
   // Recording
   const [isRecording, setIsRecording] = useState(false);
@@ -135,16 +195,16 @@ const MicCheck = () => {
   const getLevelColor = (level) => {
     if (level >= 0) return '#ef4444';
     if (level >= -3) return '#f97316';
-    if (level >= -18) return '#22c55e';
+    if (level >= -24) return '#22c55e';
     return '#64748b';
   };
 
   const getFeedbackMessage = (level) => {
     if (level >= 0) return "🔴 Clipping detected! Lower your gain or back away from the mic";
     if (level >= -3) return "🟠 Getting hot - try lowering your gain a bit";
-    if (level >= -18) return "🟢 Perfect! You're ready to record";
-    if (level >= -30) return "🟡 A bit quiet - try getting closer to the mic or raising your gain";
-    return "🔇 Very quiet - check your mic connection and gain settings";
+    if (level >= -24) return "🟢 In the sweet spot — you're ready to record";
+    if (level >= -36) return "🟡 A bit quiet - get closer or raise gain";
+    return "🔇 Very quiet - check mic and gain settings";
   };
 
   const getVideoFeedback = (brightness, hasDetection) => {
@@ -176,7 +236,7 @@ const MicCheck = () => {
       await audioContextRef.current.resume();
       const source = audioContextRef.current.createMediaStreamSource(stream);
 
-      // Try AudioWorklet (optional)
+      // Optional worklet
       try {
         await audioContextRef.current.audioWorklet.addModule('/worklets/meter-processor.js');
         workletNodeRef.current = new AudioWorkletNode(audioContextRef.current, 'meter-processor', {
@@ -208,10 +268,10 @@ const MicCheck = () => {
           setPeakLevel(Math.max(peakHoldStateRef.current.value, floor));
         };
       } catch (err) {
-        // fallback to analyser below
         console.warn('AudioWorklet init failed', err);
       }
 
+      // Analyser fallback
       analyserRef.current = audioContextRef.current.createAnalyser();
       analyserRef.current.fftSize = 1024;
       analyserRef.current.smoothingTimeConstant = 0.0;
@@ -484,10 +544,6 @@ const MicCheck = () => {
     };
   }, [stopAudioAnalysis, stopVideoAnalysis]);
 
-  // Horizontal bar (for quick glance), kept from previous build
-  const displayLevel = usePeakForFill ? peakLevel : audioLevel;
-  const levelWidth = Math.max(0, Math.min(100, (displayLevel + 60) * (100 / 60)));
-
   // ---------- UI ----------
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 to-slate-800 text-white">
@@ -542,89 +598,80 @@ const MicCheck = () => {
               </div>
             )}
 
-            {/* Logic-style meter + numbers */}
-            <div className="mt-6 flex items-center gap-4">
-              <VerticalMeter rmsDb={audioLevel} peakDb={peakLevel} />
-              <div className="flex-1">
-                <div className="flex gap-4 text-sm items-center mb-3">
-                  <span className="text-slate-400">RMS: {audioLevel.toFixed(1)} dB</span>
-                  <span
-                    className="px-2 py-1 rounded border"
-                    style={{ color: getLevelColor(peakLevel), borderColor: getLevelColor(peakLevel) }}
+            {/* Clean horizontal meter with easing + tail */}
+            <div className="mt-6">
+              <HorizontalMeter rmsDb={audioLevel} peakDb={peakLevel} />
+
+              <div className="mt-3 flex flex-wrap items-center gap-4 text-sm">
+                <span className="text-slate-400">RMS: {audioLevel.toFixed(1)} dB</span>
+                <span
+                  className="px-2 py-1 rounded border"
+                  style={{ color: getLevelColor(peakLevel), borderColor: getLevelColor(peakLevel) }}
+                >
+                  Peak: {peakLevel.toFixed(1)} dB
+                </span>
+              </div>
+
+              <div className="mt-3 p-3 bg-slate-700/50 rounded-lg">
+                <p className="text-sm">{feedback}</p>
+              </div>
+
+              {/* Transport */}
+              <div className="mt-4 flex flex-wrap gap-3">
+                {!isListening ? (
+                  <button
+                    onClick={startAudioAnalysis}
+                    className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg"
                   >
-                    Peak: {peakLevel.toFixed(1)} dB
+                    <Mic size={18} /> Start Audio Test
+                  </button>
+                ) : (
+                  <button
+                    onClick={stopAudioAnalysis}
+                    className="flex items-center gap-2 px-4 py-2 bg-red-600 hover:bg-red-700 rounded-lg"
+                  >
+                    <MicOff size={18} /> Stop Audio Test
+                  </button>
+                )}
+
+                {!isRecording ? (
+                  <button
+                    onClick={startRecording}
+                    disabled={!isListening}
+                    className="flex items-center gap-2 px-4 py-2 bg-rose-600 hover:bg-rose-700 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    <Circle size={16} /> Record
+                  </button>
+                ) : (
+                  <button
+                    onClick={stopRecording}
+                    className="flex items-center gap-2 px-4 py-2 bg-amber-600 hover:bg-amber-700 rounded-lg"
+                  >
+                    <Square size={16} /> Stop
+                  </button>
+                )}
+
+                <button
+                  onClick={playRecording}
+                  disabled={!recordedBlob || isPlaying}
+                  className="flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <Play size={16} /> Play
+                </button>
+
+                <button
+                  onClick={downloadRecording}
+                  disabled={!recordedBlob}
+                  className="flex items-center gap-2 px-4 py-2 bg-slate-600 hover:bg-slate-700 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <Download size={16} /> Download
+                </button>
+
+                {isRecording && (
+                  <span className="ml-2 text-sm text-slate-300 select-none">
+                    ● {recordingTime.toFixed(1)}s
                   </span>
-                </div>
-
-                {/* quick horizontal bar as secondary readout */}
-                <div className="relative h-6 bg-slate-700 rounded-md overflow-hidden">
-                  <div
-                    className="absolute inset-y-0 left-0 transition-all duration-100 ease-out"
-                    style={{ width: `${levelWidth}%`, backgroundColor: getLevelColor(displayLevel) }}
-                  />
-                </div>
-
-                <div className="mt-4 p-3 bg-slate-700/50 rounded-lg">
-                  <p className="text-sm">{feedback}</p>
-                </div>
-
-                {/* Transport */}
-                <div className="mt-4 flex flex-wrap gap-3">
-                  {!isListening ? (
-                    <button
-                      onClick={startAudioAnalysis}
-                      className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg"
-                    >
-                      <Mic size={18} /> Start Audio Test
-                    </button>
-                  ) : (
-                    <button
-                      onClick={stopAudioAnalysis}
-                      className="flex items-center gap-2 px-4 py-2 bg-red-600 hover:bg-red-700 rounded-lg"
-                    >
-                      <MicOff size={18} /> Stop Audio Test
-                    </button>
-                  )}
-
-                  {!isRecording ? (
-                    <button
-                      onClick={startRecording}
-                      disabled={!isListening}
-                      className="flex items-center gap-2 px-4 py-2 bg-rose-600 hover:bg-rose-700 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                      <Circle size={16} /> Record
-                    </button>
-                  ) : (
-                    <button
-                      onClick={stopRecording}
-                      className="flex items-center gap-2 px-4 py-2 bg-amber-600 hover:bg-amber-700 rounded-lg"
-                    >
-                      <Square size={16} /> Stop
-                    </button>
-                  )}
-
-                  <button
-                    onClick={playRecording}
-                    disabled={!recordedBlob || isPlaying}
-                    className="flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    <Play size={16} /> Play
-                  </button>
-
-                  <button
-                    onClick={downloadRecording}
-                    disabled={!recordedBlob}
-                    className="flex items-center gap-2 px-4 py-2 bg-slate-600 hover:bg-slate-700 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    <Download size={16} /> Download
-                  </button>
-
-                  {isRecording && (
-                    <span className="ml-2 text-sm text-slate-300 select-none">
-                      ● {recordingTime.toFixed(1)}s
-                    </span>
-                  )}
-                </div>
+                )}
               </div>
             </div>
           </div>
@@ -717,16 +764,19 @@ const MicCheck = () => {
 
           <div className="max-w-md mx-auto">
             {!emailSubmitted ? (
-              <form onSubmit={(e) => {
-                e.preventDefault();
-                try {
-                  const emails = JSON.parse(localStorage.getItem('micCheckEmails') || '[]');
-                  emails.push({ email, date: new Date().toISOString() });
-                  localStorage.setItem('micCheckEmails', JSON.stringify(emails));
-                  setEmailSubmitted(true);
-                  setEmail('');
-                } catch (error) { console.error('Error saving email:', error); }
-              }} className="flex gap-2">
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  try {
+                    const emails = JSON.parse(localStorage.getItem('micCheckEmails') || '[]');
+                    emails.push({ email, date: new Date().toISOString() });
+                    localStorage.setItem('micCheckEmails', JSON.stringify(emails));
+                    setEmailSubmitted(true);
+                    setEmail('');
+                  } catch (error) { console.error('Error saving email:', error); }
+                }}
+                className="flex gap-2"
+              >
                 <input
                   type="email"
                   value={email}
