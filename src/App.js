@@ -81,23 +81,24 @@ function HorizontalMeter({ rmsDb, peakDb, floorDb = -60 }) {
     };
   }, [rmsDb, dispPct, floorDb]);
 
-  // Colors (sweet spot widened to -24 dBFS)
+  // Colors (sweet spot widened to -24 dBFS; hot begins at -6 dBFS)
   const fillColor = (db) => {
     if (db >= 0) return '#ef4444';
-    if (db >= -3) return '#f59e0b';
+    if (db >= -6) return '#f59e0b';
     if (db >= -24) return '#22c55e';
     return 'rgba(100,116,139,0.85)';
   };
 
+  // Background zones — hot band (-6..0) is amber
   const bgZones = [
     { from: -60, to: -24, color: 'rgba(100,116,139,0.20)' }, // quiet
-    { from: -24, to: -3,  color: 'rgba(34,197,94,0.18)'  },  // sweet spot
-    { from: -3,  to: 0,   color: 'rgba(245,158,11,0.18)' },  // hot
+    { from: -24, to: -6,  color: 'rgba(34,197,94,0.20)'  },  // sweet spot (green)
+    { from: -6,  to: 0,   color: 'rgba(245,158,11,0.28)' },  // hot (amber)
   ];
 
   const ticks = [-60, -48, -36, -30, -24, -18, -12, -6, -3, 0];
-  // Only mark -24 and -3 above the line; keep 0 below to avoid overlapping the dBFS label
-  const specialUp = new Set([-24, -3]);
+  // Only mark -24 and -6 above the line; keep 0 below to avoid overlapping the dBFS label
+  const specialUp = new Set([-24, -6]);
 
   return (
     <div className="w-full">
@@ -111,12 +112,12 @@ function HorizontalMeter({ rmsDb, peakDb, floorDb = -60 }) {
           return (
             <div key={db} className="absolute" style={{ left: `calc(${x}% - 1px)`, top: 0 }}>
               <div
-                className="bg-slate-400/80"
+                className={`bg-slate-400/80 ${db === -6 ? 'bg-amber-400/80' : ''}`}
                 style={{ width: isMajor ? 2 : 1, height: isMajor ? 12 : 8, marginLeft: -1 }}
               />
               <div
                 className={`absolute ${labelUp ? '-top-4' : 'top-4'} -translate-x-1/2 text-[11px] leading-none ${
-                  (db === -24 || db === -3 || db === 0) ? 'text-white font-medium' : 'text-slate-300/80'
+                  (db === -24 || db === -6 || db === 0) ? 'text-white font-medium' : 'text-slate-300/80'
                 }`}
                 style={{ whiteSpace: 'nowrap' }}
               >
@@ -145,6 +146,12 @@ function HorizontalMeter({ rmsDb, peakDb, floorDb = -60 }) {
           );
         })}
 
+        {/* hot threshold guide at -6 dBFS (above zones, below fill) */}
+        <div
+          className="absolute top-0 bottom-0 w-[2px] bg-amber-400/60"
+          style={{ left: `calc(${norm(-6) * 100}% - 1px)`, zIndex: 2 }}
+        />
+
         {/* tail (under fill, subtle glow) (z-1) */}
         <div
           className="absolute inset-y-0 left-0"
@@ -157,22 +164,22 @@ function HorizontalMeter({ rmsDb, peakDb, floorDb = -60 }) {
           }}
         />
 
-        {/* colored fill (always on top of tail) (z-2) */}
+        {/* colored fill (always on top of tail) (z-3) */}
         <div
           className="absolute inset-y-0 left-0"
-          style={{ width: `${dispPct}%`, backgroundColor: fillColor(rmsDb), opacity: 0.98, zIndex: 2 }}
+          style={{ width: `${dispPct}%`, backgroundColor: fillColor(rmsDb), opacity: 0.98, zIndex: 3 }}
         />
 
-        {/* peak line (z-3) */}
+        {/* peak line (z-4) */}
         <div
           className="absolute top-0 bottom-0 w-[2px] bg-white/85"
-          style={{ left: `calc(${peakLinePct}% - 1px)`, zIndex: 3 }}
+          style={{ left: `calc(${peakLinePct}% - 1px)`, zIndex: 4 }}
         />
 
-        {/* clip LED (z-3) */}
+        {/* clip LED (z-4) */}
         <div
           className="absolute right-1 top-1/2 -translate-y-1/2 h-3 w-3 rounded-full"
-          style={{ backgroundColor: (peakDb ?? rmsDb) >= 0 ? '#ef4444' : 'rgba(100,116,139,0.45)', zIndex: 3 }}
+          style={{ backgroundColor: (peakDb ?? rmsDb) >= 0 ? '#ef4444' : 'rgba(100,116,139,0.45)', zIndex: 4 }}
           title="Clip"
         />
       </div>
@@ -234,14 +241,14 @@ const MicCheck = () => {
   // ---------- Helpers ----------
   const getLevelColor = (level) => {
     if (level >= 0) return '#ef4444';
-    if (level >= -3) return '#f97316';
+    if (level >= -6) return '#f97316';
     if (level >= -24) return '#22c55e';
     return '#64748b';
   };
 
   const getFeedbackMessage = (level) => {
     if (level >= 0) return "🔴 Clipping detected! Lower your gain or back away from the mic";
-    if (level >= -3) return "🟠 Getting hot - try lowering your gain a bit";
+    if (level >= -6) return "🟠 Getting hot - try lowering your gain a bit";
     if (level >= -24) return "🟢 In the sweet spot — you're ready to record";
     if (level >= -36) return "🟡 A bit quiet - get closer or raise gain";
     return "🔇 Very quiet - check mic and gain settings";
@@ -253,6 +260,71 @@ const MicCheck = () => {
     if (brightness > 200) return "☀️ Too bright - reduce lighting or move away from bright backgrounds";
     return "✅ Good lighting and framing!";
   };
+
+  /**
+   * ================ AUDIO METER LOOP (stable + safe) ================
+   * Wrapped in useCallback so hooks linter is satisfied; uses refs only.
+   */
+  const analyzeAudio = useCallback(() => {
+    const analyser = analyserRef.current;
+    if (!analyser) return;
+
+    try {
+      const binCount = analyser.frequencyBinCount || 1024;
+      const dataArray = new Uint8Array(binCount);
+      analyser.getByteFrequencyData(dataArray);
+
+      let sum = 0;
+      for (let i = 0; i < dataArray.length; i++) {
+        const normalized = dataArray[i] / 255;
+        sum += normalized * normalized;
+      }
+      const rms = Math.sqrt(sum / dataArray.length);
+      const db = rms > 0 ? 20 * Math.log10(rms) : -60;
+      const clampedDb = Math.max(db, -60);
+
+      // Update fast RMS and feedback
+      setAudioLevel(clampedDb);
+      setFeedback(getFeedbackMessage(clampedDb));
+
+      // Slow RMS display (EWMA ~0.5s)
+      const now = performance.now();
+      const dt = (now - (lastAvgTsRef.current || now)) / 1000;
+      lastAvgTsRef.current = now;
+      const TAU = 0.5;
+      const alphaAvg = 1 - Math.exp(-(dt || 0.016) / TAU);
+      const newAvg = rmsAvgRef.current + (clampedDb - rmsAvgRef.current) * alphaAvg;
+      rmsAvgRef.current = newAvg;
+      setRmsAvgDb(newAvg);
+
+      // ---- numeric/visual peak fall-back (approximate using RMS when worklet missing) ----
+      if (clampedDb > actualPeakRef.current) {
+        actualPeakRef.current = clampedDb;
+        setPeakLevel(clampedDb);
+        setPeakNumberDb(clampedDb);
+
+        if (peakHoldTimerRef.current) clearTimeout(peakHoldTimerRef.current);
+        peakHoldTimerRef.current = setTimeout(() => {
+          actualPeakRef.current = -60;
+          setPeakLevel(-60);
+          setPeakNumberDb(newAvg); // drop back to current avg
+          peakHoldTimerRef.current = null;
+        }, 2800);
+      }
+    } catch (err) {
+      console.error('Audio analysis failed:', err);
+      // Stop this loop safely without needing stopAudioAnalysis (keeps linter happy)
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current);
+        animationFrameRef.current = null;
+      }
+      analyserRef.current = null;
+      setFeedback("❌ Audio analysis error. Try stopping and starting again, or check mic permissions.");
+      return;
+    }
+
+    animationFrameRef.current = requestAnimationFrame(analyzeAudio);
+  }, []); // only refs + stable setters used
 
   // ---------- AUDIO ----------
   const startAudioAnalysis = useCallback(async () => {
@@ -335,54 +407,7 @@ const MicCheck = () => {
       console.error('Error accessing microphone:', error);
       setFeedback("❌ Couldn't access your microphone. Please check permissions.");
     }
-  }, [selectedAudioDevice]);
-
-  const analyzeAudio = () => {
-    if (!analyserRef.current) return;
-
-    const dataArray = new Uint8Array(analyserRef.current.frequencyBinCount);
-    analyserRef.current.getByteFrequencyData(dataArray);
-
-    let sum = 0;
-    for (let i = 0; i < dataArray.length; i++) {
-      const normalized = dataArray[i] / 255;
-      sum += normalized * normalized;
-    }
-    const rms = Math.sqrt(sum / dataArray.length);
-    const db = rms > 0 ? 20 * Math.log10(rms) : -60;
-    const clampedDb = Math.max(db, -60);
-
-    // Update fast RMS and feedback
-    setAudioLevel(clampedDb);
-    setFeedback(getFeedbackMessage(clampedDb));
-
-    // Slow RMS display (EWMA ~0.5s)
-    const now = performance.now();
-    const dt = (now - (lastAvgTsRef.current || now)) / 1000;
-    lastAvgTsRef.current = now;
-    const TAU = 0.5;
-    const alphaAvg = 1 - Math.exp(-(dt || 0.016) / TAU);
-    const newAvg = rmsAvgRef.current + (clampedDb - rmsAvgRef.current) * alphaAvg;
-    rmsAvgRef.current = newAvg;
-    setRmsAvgDb(newAvg);
-
-    // ---- numeric/visual peak fall-back (approximate using RMS when worklet missing) ----
-    if (clampedDb > actualPeakRef.current) {
-      actualPeakRef.current = clampedDb;
-      setPeakLevel(clampedDb);
-      setPeakNumberDb(clampedDb);
-
-      if (peakHoldTimerRef.current) clearTimeout(peakHoldTimerRef.current);
-      peakHoldTimerRef.current = setTimeout(() => {
-        actualPeakRef.current = -60;
-        setPeakLevel(-60);
-        setPeakNumberDb(newAvg); // drop back to current avg
-        peakHoldTimerRef.current = null;
-      }, 2800);
-    }
-
-    animationFrameRef.current = requestAnimationFrame(analyzeAudio);
-  };
+  }, [selectedAudioDevice, analyzeAudio]);
 
   const stopAudioAnalysis = useCallback(() => {
     if (animationFrameRef.current) {
@@ -397,7 +422,7 @@ const MicCheck = () => {
       workletNodeRef.current = null;
     }
     if (mediaStreamRef.current) {
-      mediaStreamRef.current.getTracks().forEach(t => t.stop());
+      try { mediaStreamRef.current.getTracks().forEach(t => t.stop()); } catch {}
       mediaStreamRef.current = null;
     }
     if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
@@ -408,6 +433,7 @@ const MicCheck = () => {
       clearTimeout(peakHoldTimerRef.current);
       peakHoldTimerRef.current = null;
     }
+    analyserRef.current = null;
     setIsListening(false);
     setAudioLevel(-60);
     setRmsAvgDb(-60);
@@ -622,6 +648,24 @@ const MicCheck = () => {
   const FixedNum = ({ value }) => (
     <span className="font-mono tabular-nums inline-block w-[6ch] text-right">{value}</span>
   );
+
+  // ---------------- Development sanity checks -----------------
+  if (process.env.NODE_ENV === 'development') {
+    // quick one-time check to make sure color split shows
+    const _once = (window).__mc_once__;
+    if (!_once) {
+      (window).__mc_once__ = true;
+      const map = (floor) => [
+        { band: 'quiet',   left: ((-60 - floor)/(0 - floor))*100, right: ((-24 - floor)/(0 - floor))*100 },
+        { band: 'sweet',   left: ((-24 - floor)/(0 - floor))*100, right: ((-6  - floor)/(0 - floor))*100 },
+        { band: 'hot',     left: ((-6  - floor)/(0 - floor))*100, right: ((0   - floor)/(0 - floor))*100 },
+      ];
+      // eslint-disable-next-line no-console
+      console.log('[MicCheck dev] zone percents @floor -60:', map(-60));
+      // eslint-disable-next-line no-console
+      console.log('[MicCheck dev] zone percents @floor -40:', map(-40));
+    }
+  }
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 to-slate-800 text-white">
