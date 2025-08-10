@@ -96,7 +96,8 @@ function HorizontalMeter({ rmsDb, peakDb, floorDb = -60 }) {
   ];
 
   const ticks = [-60, -48, -36, -30, -24, -18, -12, -6, -3, 0];
-  const special = new Set([-24, -3, 0]);
+  // Only mark -24 and -3 above the line; keep 0 below to avoid overlapping the dBFS label
+  const specialUp = new Set([-24, -3]);
 
   return (
     <div className="w-full">
@@ -105,8 +106,8 @@ function HorizontalMeter({ rmsDb, peakDb, floorDb = -60 }) {
         <div className="absolute left-0 right-0 top-1/2 -translate-y-1/2 h-px bg-slate-600/60" />
         {ticks.map((db) => {
           const x = norm(db) * 100;
-          const isMajor = db % 12 === 0 || special.has(db);
-          const labelUp = special.has(db);
+          const isMajor = db % 12 === 0 || specialUp.has(db) || db === 0;
+          const labelUp = specialUp.has(db);
           return (
             <div key={db} className="absolute" style={{ left: `calc(${x}% - 1px)`, top: 0 }}>
               <div
@@ -115,7 +116,7 @@ function HorizontalMeter({ rmsDb, peakDb, floorDb = -60 }) {
               />
               <div
                 className={`absolute ${labelUp ? '-top-4' : 'top-4'} -translate-x-1/2 text-[11px] leading-none ${
-                  special.has(db) ? 'text-white font-medium' : 'text-slate-300/80'
+                  (db === -24 || db === -3 || db === 0) ? 'text-white font-medium' : 'text-slate-300/80'
                 }`}
                 style={{ whiteSpace: 'nowrap' }}
               >
@@ -124,7 +125,8 @@ function HorizontalMeter({ rmsDb, peakDb, floorDb = -60 }) {
             </div>
           );
         })}
-        <div className="absolute right-0 -top-4 text-[10px] text-slate-400/70">dBFS</div>
+        {/* Move dBFS to the left to prevent overlap with the 0 dB label */}
+        <div className="absolute left-0 -top-4 text-[10px] text-slate-400/70">dBFS</div>
       </div>
 
       {/* meter bar */}
@@ -181,7 +183,8 @@ function HorizontalMeter({ rmsDb, peakDb, floorDb = -60 }) {
 const MicCheck = () => {
   // ---------- State ----------
   const [isListening, setIsListening] = useState(false);
-  const [audioLevel, setAudioLevel] = useState(-60); // RMS-ish
+  const [audioLevel, setAudioLevel] = useState(-60); // RMS-ish (fast)
+  const [rmsAvgDb, setRmsAvgDb] = useState(-60);     // RMS averaged (slow display)
   const [peakLevel, setPeakLevel] = useState(-60);
   const [feedback, setFeedback] = useState("Click 'Start Audio Test' to check your microphone");
   const [audioDevices, setAudioDevices] = useState([]);
@@ -217,6 +220,9 @@ const MicCheck = () => {
   const peakHoldStateRef = useRef({ value: -60, ts: 0 });
   const peakHoldTimerRef = useRef(null);
   const animationFrameRef = useRef(null);
+
+  const rmsAvgRef = useRef(-60);
+  const lastAvgTsRef = useRef(0);
 
   const videoRef = useRef(null);
   const videoStreamRef = useRef(null);
@@ -287,6 +293,7 @@ const MicCheck = () => {
           const dt = (now - (lastTsRef.current || now)) / 1000;
           lastTsRef.current = now;
 
+          // Fast-ish RMS for the bar/logic
           const releasePerSec = 90;
           const current = audioLevelRef.current ?? floor;
           const target = Math.max(rmsDb, floor);
@@ -294,13 +301,23 @@ const MicCheck = () => {
           audioLevelRef.current = next;
           setAudioLevel(next);
 
-          const holdTime = 1500;
+          // Slow RMS for the numeric readout (EWMA ~0.5s)
+          const TAU = 0.5; // seconds
+          const alphaAvg = 1 - Math.exp(-(dt || 0.016) / TAU);
+          const newAvg = rmsAvgRef.current + (next - rmsAvgRef.current) * alphaAvg;
+          rmsAvgRef.current = newAvg;
+          setRmsAvgDb(newAvg);
+
+          // Peak hold state (worklet-provided true peaks)
+          const holdTime = 1500; // ms
           const prev = peakHoldStateRef.current?.value ?? floor;
           const prevTs = peakHoldStateRef.current?.ts ?? 0;
           if (peakDb > prev || now - prevTs > holdTime) {
             peakHoldStateRef.current = { value: peakDb, ts: now };
           }
           setPeakLevel(Math.max(peakHoldStateRef.current.value, floor));
+          // Keep the numeric peak-hold in sync with the held value
+          setPeakNumberDb(Math.max(peakHoldStateRef.current.value, floor));
         };
       } catch (err) {
         console.warn('AudioWorklet init failed', err);
@@ -335,31 +352,31 @@ const MicCheck = () => {
     const db = rms > 0 ? 20 * Math.log10(rms) : -60;
     const clampedDb = Math.max(db, -60);
 
+    // Update fast RMS and feedback
     setAudioLevel(clampedDb);
     setFeedback(getFeedbackMessage(clampedDb));
 
-    // ---- numeric peak hold (holds until higher peak OR 2s timeout) ----
+    // Slow RMS display (EWMA ~0.5s)
     const now = performance.now();
-    setPeakNumberDb((prev) => {
-      if (clampedDb > prev) {
-        peakNumberTsRef.current = now;
-        return clampedDb;
-      }
-      if (now - (peakNumberTsRef.current || 0) > 2000) {
-        peakNumberTsRef.current = now;
-        return clampedDb;
-      }
-      return prev;
-    });
+    const dt = (now - (lastAvgTsRef.current || now)) / 1000;
+    lastAvgTsRef.current = now;
+    const TAU = 0.5;
+    const alphaAvg = 1 - Math.exp(-(dt || 0.016) / TAU);
+    const newAvg = rmsAvgRef.current + (clampedDb - rmsAvgRef.current) * alphaAvg;
+    rmsAvgRef.current = newAvg;
+    setRmsAvgDb(newAvg);
 
+    // ---- numeric/visual peak fall-back (approximate using RMS when worklet missing) ----
     if (clampedDb > actualPeakRef.current) {
       actualPeakRef.current = clampedDb;
       setPeakLevel(clampedDb);
+      setPeakNumberDb(clampedDb);
 
       if (peakHoldTimerRef.current) clearTimeout(peakHoldTimerRef.current);
       peakHoldTimerRef.current = setTimeout(() => {
         actualPeakRef.current = -60;
         setPeakLevel(-60);
+        setPeakNumberDb(newAvg); // drop back to current avg
         peakHoldTimerRef.current = null;
       }, 2800);
     }
@@ -393,8 +410,11 @@ const MicCheck = () => {
     }
     setIsListening(false);
     setAudioLevel(-60);
+    setRmsAvgDb(-60);
     setPeakLevel(-60);
+    setPeakNumberDb(-60);
     actualPeakRef.current = -60;
+    rmsAvgRef.current = -60;
     setFeedback("Click 'Start Audio Test' to check your microphone");
   }, []);
 
@@ -598,6 +618,11 @@ const MicCheck = () => {
   const barDb = usePeakForFill ? peakLevel : audioLevel;
   const meterFloor = usePeakForFill ? -60 : -40;
 
+  // Little helper for fixed-width numeric tokens (prevents layout shift)
+  const FixedNum = ({ value }) => (
+    <span className="font-mono tabular-nums inline-block w-[6ch] text-right">{value}</span>
+  );
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 to-slate-800 text-white">
       <div className="container mx-auto px-4 py-8 max-w-5xl">
@@ -622,13 +647,13 @@ const MicCheck = () => {
                 >
                   {usePeakForFill ? 'PEAK' : 'RMS'}
                 </span>
-                <label className="inline-flex items-center gap-2 cursor-pointer">
+                <label className="inline-flex items-center gap-2 cursor-pointer select-none">
                   <input
                     type="checkbox"
                     checked={usePeakForFill}
                     onChange={() => setUsePeakForFill((v) => !v)}
                   />
-                  <span className="select-none">{usePeakForFill ? 'Bar uses Peak' : 'Bar uses RMS'}</span>
+                  <span>{usePeakForFill ? 'Bar uses Peak' : 'Bar uses RMS'}</span>
                 </label>
               </div>
             </div>
@@ -655,16 +680,19 @@ const MicCheck = () => {
             <div className="mt-6">
               <HorizontalMeter rmsDb={barDb} peakDb={peakLevel} floorDb={meterFloor} />
 
-              <div className="mt-3 flex flex-wrap items-center gap-4 text-sm">
-                <span className="text-slate-400">RMS: {audioLevel.toFixed(1)} dB</span>
+              {/* Readouts with fixed-width numbers to prevent jitter */}
+              <div className="mt-3 flex flex-wrap items-center gap-4 text-sm min-h-[2rem]">
+                <span className="text-slate-300/90">
+                  RMS (avg): <FixedNum value={rmsAvgDb.toFixed(1)} /> dB
+                </span>
                 <span
-                  className="px-2 py-1 rounded border"
+                  className="inline-flex items-center gap-1 px-2 py-1 rounded border"
                   style={{ color: getLevelColor(peakLevel), borderColor: getLevelColor(peakLevel) }}
                 >
-                  Peak line: {peakLevel.toFixed(1)} dB
+                  Peak line: <FixedNum value={peakLevel.toFixed(1)} /> dB
                 </span>
-                <span className="px-2 py-1 rounded border border-slate-600 text-slate-200">
-                  Peak (hold): {peakNumberDb.toFixed(1)} dB
+                <span className="inline-flex items-center gap-1 px-2 py-1 rounded border border-slate-600 text-slate-200">
+                  Peak (hold): <FixedNum value={peakNumberDb.toFixed(1)} /> dB
                 </span>
               </div>
 
