@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { Mic, MicOff, Video, VideoOff, Play, Square, Download, Circle, Mail } from 'lucide-react';
 
 /** ======= Horizontal meter (instant bar, peak hold + fast fall, fixed z-order) ======= */
-function HorizontalMeter({ rmsDb, peakDb, floorDb = -60 }) {
+function HorizontalMeter({ rmsDb, peakDb, peakHoldDb, floorDb = -60, onResetPeakHold }) {
   // Map [floorDb..0] dBFS -> [0..1]
   const norm = (db) => {
     const span = 0 - floorDb; // e.g., 60 if floorDb=-60, 40 if floorDb=-40
@@ -182,6 +182,18 @@ function HorizontalMeter({ rmsDb, peakDb, floorDb = -60 }) {
           style={{ backgroundColor: (peakDb ?? rmsDb) >= 0 ? '#ef4444' : 'rgba(100,116,139,0.45)', zIndex: 4 }}
           title="Clip"
         />
+
+        {/* Peak (hold) reset badge — tiny, clickable */}
+        {typeof peakHoldDb === 'number' && (
+          <button
+            type="button"
+            onClick={onResetPeakHold}
+            className="absolute top-0.5 right-5 text-[10px] px-1.5 py-[2px] rounded-md border border-slate-600/70 bg-slate-900/80 text-slate-200/90 z-[5] shadow-sm hover:bg-slate-800/80 hover:border-slate-500/70 active:scale-[0.98] cursor-pointer select-none font-mono tabular-nums"
+            title="Click to reset peak hold"
+          >
+            <span className="inline-block w-[7ch] text-right">{peakHoldDb.toFixed(1)}</span> dB
+          </button>
+        )}
       </div>
     </div>
   );
@@ -211,7 +223,6 @@ const MicCheck = () => {
 
   // Numeric peak (hold)
   const [peakNumberDb, setPeakNumberDb] = useState(-60);
-  const peakNumberTsRef = useRef(0);
 
   // Email
   const [email, setEmail] = useState('');
@@ -235,8 +246,20 @@ const MicCheck = () => {
   const videoStreamRef = useRef(null);
   const videoAnalysisRef = useRef(null);
   const actualPeakRef = useRef(-60);
+  const maxPeakRef = useRef(-60);
   const mediaRecorderRef = useRef(null);
   const recordingTimerRef = useRef(null);
+
+  // ---------- Reset handlers ----------
+  const resetPeakHold = useCallback(() => {
+    if (peakHoldTimerRef.current) {
+      clearTimeout(peakHoldTimerRef.current);
+      peakHoldTimerRef.current = null;
+    }
+    // Drop max to baseline and wait for next peak
+    maxPeakRef.current = -60;
+    setPeakNumberDb(-60);
+  }, []);
 
   // ---------- Helpers ----------
   const getLevelColor = (level) => {
@@ -283,9 +306,8 @@ const MicCheck = () => {
       const db = rms > 0 ? 20 * Math.log10(rms) : -60;
       const clampedDb = Math.max(db, -60);
 
-      // Update fast RMS and feedback
+      // Fast RMS for the bar
       setAudioLevel(clampedDb);
-      setFeedback(getFeedbackMessage(clampedDb));
 
       // Slow RMS display (EWMA ~0.5s)
       const now = performance.now();
@@ -297,20 +319,18 @@ const MicCheck = () => {
       rmsAvgRef.current = newAvg;
       setRmsAvgDb(newAvg);
 
-      // ---- numeric/visual peak fall-back (approximate using RMS when worklet missing) ----
-      if (clampedDb > actualPeakRef.current) {
-        actualPeakRef.current = clampedDb;
-        setPeakLevel(clampedDb);
-        setPeakNumberDb(clampedDb);
+      // Use averaged RMS for feedback to prevent jitter
+      setFeedback(getFeedbackMessage(newAvg));
 
-        if (peakHoldTimerRef.current) clearTimeout(peakHoldTimerRef.current);
-        peakHoldTimerRef.current = setTimeout(() => {
-          actualPeakRef.current = -60;
-          setPeakLevel(-60);
-          setPeakNumberDb(newAvg); // drop back to current avg
-          peakHoldTimerRef.current = null;
-        }, 2800);
+      // ---- numeric/visual peak fall-back (approximate using RMS when worklet missing) ----
+      // Update numeric Max (since last reset)
+      if (clampedDb > maxPeakRef.current) {
+        maxPeakRef.current = clampedDb;
+        setPeakNumberDb(clampedDb);
       }
+
+      // Update 'peak line' numeric using instantaneous fallback
+      setPeakLevel(clampedDb);
     } catch (err) {
       console.error('Audio analysis failed:', err);
       // Stop this loop safely without needing stopAudioAnalysis (keeps linter happy)
@@ -380,6 +400,9 @@ const MicCheck = () => {
           rmsAvgRef.current = newAvg;
           setRmsAvgDb(newAvg);
 
+          // Use averaged RMS for feedback to prevent jitter
+          setFeedback(getFeedbackMessage(newAvg));
+
           // Peak hold state (worklet-provided true peaks)
           const holdTime = 1500; // ms
           const prev = peakHoldStateRef.current?.value ?? floor;
@@ -388,8 +411,11 @@ const MicCheck = () => {
             peakHoldStateRef.current = { value: peakDb, ts: now };
           }
           setPeakLevel(Math.max(peakHoldStateRef.current.value, floor));
-          // Keep the numeric peak-hold in sync with the held value
-          setPeakNumberDb(Math.max(peakHoldStateRef.current.value, floor));
+          // Update numeric Max (since last reset)
+          if (typeof peakDb === 'number' && peakDb > maxPeakRef.current) {
+            maxPeakRef.current = peakDb;
+            setPeakNumberDb(peakDb);
+          }
         };
       } catch (err) {
         console.warn('AudioWorklet init failed', err);
@@ -664,6 +690,14 @@ const MicCheck = () => {
       console.log('[MicCheck dev] zone percents @floor -60:', map(-60));
       // eslint-disable-next-line no-console
       console.log('[MicCheck dev] zone percents @floor -40:', map(-40));
+
+      // Basic threshold unit tests (dev only)
+      const zoneForDb = (db) => (db >= 0 ? 'red' : db >= -6 ? 'amber' : db >= -24 ? 'green' : 'quiet');
+      console.assert(zoneForDb(-30) === 'quiet', 'zone test: -30 should be quiet');
+      console.assert(zoneForDb(-20) === 'green', 'zone test: -20 should be green');
+      console.assert(zoneForDb(-6) === 'amber', 'zone test: -6 should be amber');
+      console.assert(zoneForDb(-2) === 'amber', 'zone test: -2 should be amber');
+      console.assert(zoneForDb(0) === 'red', 'zone test: 0 should be red');
     }
   }
 
@@ -722,7 +756,7 @@ const MicCheck = () => {
 
             {/* Meter */}
             <div className="mt-6">
-              <HorizontalMeter rmsDb={barDb} peakDb={peakLevel} floorDb={meterFloor} />
+              <HorizontalMeter rmsDb={barDb} peakDb={peakLevel} peakHoldDb={peakNumberDb} floorDb={meterFloor} onResetPeakHold={resetPeakHold} />
 
               {/* Readouts with fixed-width numbers to prevent jitter */}
               <div className="mt-3 flex flex-wrap items-center gap-4 text-sm min-h-[2rem]">
@@ -734,9 +768,6 @@ const MicCheck = () => {
                   style={{ color: getLevelColor(peakLevel), borderColor: getLevelColor(peakLevel) }}
                 >
                   Peak line: <FixedNum value={peakLevel.toFixed(1)} /> dB
-                </span>
-                <span className="inline-flex items-center gap-1 px-2 py-1 rounded border border-slate-600 text-slate-200">
-                  Peak (hold): <FixedNum value={peakNumberDb.toFixed(1)} /> dB
                 </span>
               </div>
 
