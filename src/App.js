@@ -17,6 +17,7 @@ const MicCheck = () => {
   const [email, setEmail] = useState('');
   const [emailSubmitted, setEmailSubmitted] = useState(false);
   const [usePeakForFill, setUsePeakForFill] = useState(true);
+  const [hasVideoFrame, setHasVideoFrame] = useState(false); // NEW: so the box shows even before frames
 
   const audioContextRef = useRef(null);
   const analyserRef = useRef(null);
@@ -29,6 +30,7 @@ const MicCheck = () => {
   const mediaRecorderRef = useRef(null);
   const animationFrameRef = useRef(null);
   const recordingTimerRef = useRef(null);
+
   const videoRef = useRef(null);
   const videoStreamRef = useRef(null);
   const videoAnalysisRef = useRef(null);
@@ -56,6 +58,8 @@ const MicCheck = () => {
     return "✅ Good lighting and framing!";
   };
 
+  // ---------------- AUDIO ----------------
+
   const startAudioAnalysis = async () => {
     try {
       setPeakLevel(-60);
@@ -76,7 +80,7 @@ const MicCheck = () => {
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
 
       mediaStreamRef.current = stream;
-      audioContextRef.current = new AudioContext();
+      audioContextRef.current = new (window.AudioContext || window.webkitAudioContext)();
       await audioContextRef.current.resume();
       const source = audioContextRef.current.createMediaStreamSource(stream);
 
@@ -96,7 +100,6 @@ const MicCheck = () => {
           const dt = (now - (lastTsRef.current || now)) / 1000;
           lastTsRef.current = now;
 
-          // Fast falloff for the bar when signal drops (feels responsive)
           const releasePerSec = 90;
           const current = audioLevelRef.current ?? floor;
           const target = Math.max(rmsDb, floor);
@@ -104,7 +107,6 @@ const MicCheck = () => {
           audioLevelRef.current = next;
           setAudioLevel(next);
 
-          // Peak hold (~1.5s)
           const holdTime = 1500;
           const prev = peakHoldStateRef.current?.value ?? floor;
           const prevTs = peakHoldStateRef.current?.ts ?? 0;
@@ -149,7 +151,6 @@ const MicCheck = () => {
     setAudioLevel(clampedDb);
     setFeedback(getFeedbackMessage(clampedDb));
 
-    // Peak w/ hold timer (decay after 2.8s)
     if (clampedDb > actualPeakRef.current) {
       actualPeakRef.current = clampedDb;
       setPeakLevel(clampedDb);
@@ -171,7 +172,6 @@ const MicCheck = () => {
       animationFrameRef.current = null;
     }
 
-    // disconnect worklet
     if (workletNodeRef.current) {
       try {
         workletNodeRef.current.port.onmessage = null;
@@ -180,7 +180,6 @@ const MicCheck = () => {
       workletNodeRef.current = null;
     }
 
-    // stop tracks and drop the stream
     if (mediaStreamRef.current) {
       mediaStreamRef.current.getTracks().forEach(t => t.stop());
       mediaStreamRef.current = null;
@@ -203,145 +202,139 @@ const MicCheck = () => {
     setFeedback("Click 'Start Audio Test' to check your microphone");
   }, []);
 
-  // --- VIDEO: start, analyze, stop (robust) ---
+  // ---------------- VIDEO (robust) ----------------
 
-const startVideoAnalysis = async () => {
-  try {
-    // 1) Release any previous video first
+  const startVideoAnalysis = async () => {
+    try {
+      // Clean slate
+      setHasVideoFrame(false);
+      if (videoAnalysisRef.current) {
+        cancelAnimationFrame(videoAnalysisRef.current);
+        videoAnalysisRef.current = null;
+      }
+      if (videoStreamRef.current) {
+        try { videoStreamRef.current.getTracks().forEach(t => t.stop()); } catch {}
+        videoStreamRef.current = null;
+      }
+
+      // Ask for VIDEO only
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } },
+        audio: false
+      });
+
+      setIsVideoEnabled(true); // set early so analyze guard passes
+      videoStreamRef.current = stream;
+
+      const el = videoRef.current;
+      if (!el) {
+        setVideoFeedback("❌ Video element not found.");
+        return;
+      }
+
+      // Attributes before stream
+      el.autoplay = true;
+      el.muted = true;
+      el.setAttribute('playsinline', '');
+      el.srcObject = null;
+      el.srcObject = stream;
+      el.load();
+
+      let played = false;
+      const tryPlay = async (label) => {
+        try {
+          await el.play();
+          played = true;
+          // kick analysis
+          setTimeout(() => analyzeVideo(), 100);
+        } catch (err) {
+          console.warn(`video.play() ${label} failed:`, err?.name || err);
+        }
+      };
+
+      await tryPlay('immediate');
+      el.onloadedmetadata = () => { if (!played) tryPlay('onloadedmetadata'); };
+      el.oncanplay = () => { if (!played) tryPlay('oncanplay'); };
+      el.onplaying = () => {
+        if (!played) tryPlay('onplaying');
+        setTimeout(() => analyzeVideo(), 120);
+      };
+
+      // last resort
+      setTimeout(() => {
+        if (!played) tryPlay('delayed');
+        analyzeVideo();
+      }, 400);
+
+    } catch (error) {
+      console.error('Error accessing camera:', error);
+      setVideoFeedback(`❌ Couldn't access your camera: ${error.message}`);
+      setIsVideoEnabled(false);
+    }
+  };
+
+  function analyzeVideo() {
+    if (!isVideoEnabled) return;
+
+    const el = videoRef.current;
+    if (!el || !el.srcObject) {
+      videoAnalysisRef.current = requestAnimationFrame(analyzeVideo);
+      return;
+    }
+
+    if (el.readyState < 2) { // HAVE_CURRENT_DATA
+      videoAnalysisRef.current = requestAnimationFrame(analyzeVideo);
+      return;
+    }
+
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    canvas.width = 160;
+    canvas.height = 120;
+
+    try {
+      ctx.drawImage(el, 0, 0, canvas.width, canvas.height);
+      const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+
+      let total = 0;
+      for (let i = 0; i < data.length; i += 4) {
+        total += (data[i] + data[i + 1] + data[i + 2]) / 3;
+      }
+      const avg = total / (data.length / 4);
+      setHasVideoFrame(true);
+      setVideoFeedback(getVideoFeedback(avg, true));
+    } catch (err) {
+      console.warn('Video analysis draw failed:', err?.name || err);
+    }
+
+    videoAnalysisRef.current = requestAnimationFrame(analyzeVideo);
+  }
+
+  const stopVideoAnalysis = useCallback(() => {
+    setIsVideoEnabled(false);
+    setHasVideoFrame(false);
     if (videoAnalysisRef.current) {
       cancelAnimationFrame(videoAnalysisRef.current);
       videoAnalysisRef.current = null;
     }
-    if (videoStreamRef.current) {
-      try { videoStreamRef.current.getTracks().forEach(t => t.stop()); } catch {}
-      videoStreamRef.current = null;
-    }
-
-    // 2) Request video only (no audio, so we don't collide with the mic stream)
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } },
-      audio: false
-    });
-
-    videoStreamRef.current = stream;
-
-    // 3) Wire up the <video> element carefully
-    const el = videoRef.current;
-    if (!el) {
-      setVideoFeedback("❌ Video element not found.");
-      return;
-    }
-
-    // Clear then attach stream (prevents stale attachment issues)
-    el.srcObject = null;
-    el.autoplay = true;                // React prop also set, but set it here too
-    el.muted = true;                   // Required for autoplay in Chrome
-    el.setAttribute('playsinline', ''); // iOS/Chrome mobile
-    el.srcObject = stream;
-    el.load();                         // Ensure readyState resets
-
-    let played = false;
-    const tryPlay = async (label = "initial") => {
-      try {
-        await el.play();
-        played = true;
-      } catch (err) {
-        console.warn(`video.play() ${label} failed:`, err?.name || err);
-      }
-    };
-
-    // 4) Multiple chances to start playback
-    await tryPlay("immediate");
-
-    el.onloadedmetadata = async () => {
-      if (!played) await tryPlay("onloadedmetadata");
-    };
-    el.oncanplay = async () => {
-      if (!played) await tryPlay("oncanplay");
-    };
-    el.onplaying = () => {
-      // We’re live — kick off analysis shortly to ensure frames are available
-      setTimeout(() => {
-        if (isVideoEnabled) analyzeVideo();
-      }, 100);
-    };
-
-    // 5) Mark enabled and kick a delayed analyze in case events don’t fire
-    setIsVideoEnabled(true);
-    setTimeout(() => {
-      if (!played) tryPlay("delayed");
-      analyzeVideo();
-    }, 300);
-
-  } catch (error) {
-    console.error('Error accessing camera:', error);
-    setVideoFeedback(`❌ Couldn't access your camera: ${error.message}`);
-  }
-};
-
-function analyzeVideo() {
-  if (!isVideoEnabled) return;
-  const el = videoRef.current;
-
-  // If no element or no stream, stop trying
-  if (!el || !el.srcObject) {
-    videoAnalysisRef.current = requestAnimationFrame(analyzeVideo);
-    return;
-  }
-
-  // Wait for data to be ready
-  if (el.readyState < 2) { // HAVE_CURRENT_DATA
-    videoAnalysisRef.current = requestAnimationFrame(analyzeVideo);
-    return;
-  }
-
-  // Lightweight brightness check (sufficient for feedback)
-  const canvas = document.createElement('canvas');
-  const ctx = canvas.getContext('2d', { willReadFrequently: true });
-  canvas.width = 160;
-  canvas.height = 120;
-
-  try {
-    ctx.drawImage(el, 0, 0, canvas.width, canvas.height);
-    const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
-
-    let total = 0;
-    for (let i = 0; i < data.length; i += 4) {
-      total += (data[i] + data[i + 1] + data[i + 2]) / 3;
-    }
-    const avg = total / (data.length / 4);
-    setVideoFeedback(getVideoFeedback(avg, true));
-  } catch (err) {
-    // If drawing fails, just try again next frame
-    console.warn('Video analysis draw failed:', err?.name || err);
-  }
-
-  videoAnalysisRef.current = requestAnimationFrame(analyzeVideo);
-}
-
-const stopVideoAnalysis = useCallback(() => {
-  setIsVideoEnabled(false);
-  if (videoAnalysisRef.current) {
-    cancelAnimationFrame(videoAnalysisRef.current);
-    videoAnalysisRef.current = null;
-  }
-  try {
-    if (videoStreamRef.current) {
-      videoStreamRef.current.getTracks().forEach((t) => t.stop());
-      videoStreamRef.current = null;
-    }
-  } catch {}
-  if (videoRef.current) {
     try {
-      videoRef.current.pause();
-      videoRef.current.removeAttribute('src'); // for good measure
-      videoRef.current.srcObject = null;
-      videoRef.current.load();
+      if (videoStreamRef.current) {
+        videoStreamRef.current.getTracks().forEach((t) => t.stop());
+        videoStreamRef.current = null;
+      }
     } catch {}
-  }
-  setVideoFeedback("Click 'Start Video' to check your camera");
-}, []);
+    if (videoRef.current) {
+      try {
+        videoRef.current.pause();
+        videoRef.current.removeAttribute('src');
+        videoRef.current.srcObject = null;
+        videoRef.current.load();
+      } catch {}
+    }
+    setVideoFeedback("Click 'Start Video' to check your camera");
+  }, []);
 
+  // ---------------- RECORDING ----------------
 
   const startRecording = async () => {
     if (!mediaStreamRef.current) {
@@ -425,6 +418,8 @@ const stopVideoAnalysis = useCallback(() => {
     }
   };
 
+  // ---------------- EFFECTS ----------------
+
   useEffect(() => {
     const getAudioDevices = async () => {
       try {
@@ -452,6 +447,8 @@ const stopVideoAnalysis = useCallback(() => {
 
   const displayLevel = usePeakForFill ? peakLevel : audioLevel;
   const levelWidth = Math.max(0, Math.min(100, (displayLevel + 60) * (100 / 60)));
+
+  // ---------------- UI ----------------
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 to-slate-800 text-white">
@@ -517,13 +514,9 @@ const stopVideoAnalysis = useCallback(() => {
             <div className="relative h-24 bg-slate-700 rounded-lg overflow-hidden">
               {/* Background zones mapped to -60..0 dB */}
               <div className="absolute inset-0">
-                {/* Quiet 0%→70% */}
                 <div className="absolute left-0 top-0 h-full" style={{ width: '70%', backgroundColor: '#556070' }} />
-                {/* Perfect -18→-9 dB = 70%→85% */}
                 <div className="absolute top-0 h-full" style={{ left: '70%', width: '15%', backgroundColor: 'rgba(16,185,129,0.20)' }} />
-                {/* Hot -9→-3 dB = 85%→95% */}
                 <div className="absolute top-0 h-full" style={{ left: '85%', width: '10%', backgroundColor: 'rgba(251,146,60,0.20)' }} />
-                {/* Clip -3→0 dB = 95%→100% */}
                 <div className="absolute top-0 h-full" style={{ left: '95%', width: '5%', backgroundColor: 'rgba(239,68,68,0.20)' }} />
               </div>
 
@@ -598,88 +591,46 @@ const stopVideoAnalysis = useCallback(() => {
                 </button>
               )}
             </div>
-
-            {isListening && (
-              <div className="border-t border-slate-600 pt-6">
-                <h3 className="text-lg font-semibold mb-4 text-center">5-Second Sound Check</h3>
-
-                <div className="flex gap-4 justify-center items-center">
-                  {!isRecording ? (
-                    <button
-                      onClick={startRecording}
-                      className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium transition-colors"
-                    >
-                      <div className="w-3 h-3 bg-white rounded-full"></div>
-                      Record Test
-                    </button>
-                  ) : (
-                    <button
-                      onClick={stopRecording}
-                      className="flex items-center gap-2 px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg font-medium transition-colors"
-                    >
-                      <Square size={16} fill="white" />
-                      Stop ({(5 - recordingTime).toFixed(1)}s)
-                    </button>
-                  )}
-
-                  {recordedBlob && (
-                    <>
-                      <button
-                        onClick={playRecording}
-                        disabled={isPlaying}
-                        className="flex items-center gap-2 px-4 py-2 bg-slate-600 hover:bg-slate-700 disabled:opacity-50 text-white rounded-lg font-medium transition-colors"
-                      >
-                        <Play size={16} />
-                        {isPlaying ? 'Playing...' : 'Play Test'}
-                      </button>
-
-                      <button
-                        onClick={downloadRecording}
-                        className="flex items-center gap-2 px-4 py-2 bg-slate-600 hover:bg-slate-700 text-white rounded-lg font-medium transition-colors"
-                      >
-                        <Download size={16} />
-                        Download
-                      </button>
-                    </>
-                  )}
-                </div>
-              </div>
-            )}
           </div>
         </div>
 
-        {isVideoEnabled && (
-          <div className="mt-8 bg-slate-800/50 backdrop-blur rounded-2xl p-8 border border-slate-700">
-            <h2 className="text-xl font-semibold mb-4">Video Check</h2>
-
-            <div className="grid md:grid-cols-2 gap-6">
-              <div className="relative">
+        {/* VIDEO CARD: always visible so you see the box */}
+        <div className="mt-8 bg-slate-800/50 backdrop-blur rounded-2xl p-8 border border-slate-700">
+          <h2 className="text-xl font-semibold mb-4">Video Check</h2>
+          <div className="grid md:grid-cols-2 gap-6">
+            <div className="relative">
+              <div className="relative w-full rounded-lg overflow-hidden bg-slate-700" style={{ minHeight: '240px', maxHeight: '360px', aspectRatio: '16 / 9' }}>
                 <video
                   ref={videoRef}
                   autoPlay
                   muted
                   playsInline
-                  className="w-full rounded-lg bg-slate-700 object-cover"
-                  style={{ minHeight: '240px', maxHeight: '360px', aspectRatio: '16 / 9' }}
+                  className="absolute inset-0 w-full h-full object-cover"
                 />
-                <div className="absolute inset-4 border-2 border-white/30 rounded-lg pointer-events-none"></div>
+                {!isVideoEnabled || !hasVideoFrame ? (
+                  <div className="absolute inset-0 flex items-center justify-center text-slate-300">
+                    {isVideoEnabled ? 'Starting camera…' : 'Camera off'}
+                  </div>
+                ) : null}
+              </div>
+              <div className="absolute inset-4 border-2 border-white/30 rounded-lg pointer-events-none"></div>
+            </div>
+
+            <div className="space-y-4">
+              <div className="p-4 bg-slate-700/50 rounded-lg">
+                <p className="text-lg">{videoFeedback}</p>
               </div>
 
-              <div className="space-y-4">
-                <div className="p-4 bg-slate-700/50 rounded-lg">
-                  <p className="text-lg">{videoFeedback}</p>
-                </div>
-
-                <div className="text-sm text-slate-300 space-y-2">
-                  <div><strong className="text-white">Good framing:</strong> Eyes in upper third of frame</div>
-                  <div><strong className="text-white">Lighting tips:</strong> Face a window or add soft front light</div>
-                  <div><strong className="text-white">Distance:</strong> Arm's length from camera works best</div>
-                </div>
+              <div className="text-sm text-slate-300 space-y-2">
+                <div><strong className="text-white">Good framing:</strong> Eyes in upper third of frame</div>
+                <div><strong className="text-white">Lighting tips:</strong> Face a window or add soft front light</div>
+                <div><strong className="text-white">Distance:</strong> Arm's length from camera works best</div>
               </div>
             </div>
           </div>
-        )}
+        </div>
 
+        {/* Email / Links */}
         <div className="mt-8 space-y-4">
           <div className="flex flex-col sm:flex-row gap-4 justify-center">
             <a
