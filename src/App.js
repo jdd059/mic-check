@@ -1,46 +1,69 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { Mic, MicOff, Video, VideoOff, Play, Square, Download, Circle, Mail } from 'lucide-react';
 
-/** ======= Horizontal smooth meter with easing + decay tail (-24→-3 sweet spot) ======= */
+/** ======= Horizontal meter (instant bar, peak hold + fast fall, fixed z-order) ======= */
 function HorizontalMeter({ rmsDb, peakDb }) {
   const norm = (db) => Math.max(0, Math.min(1, (db + 60) / 60)); // -60..0 dBFS -> 0..1
 
-  const targetRmsPct = norm(rmsDb) * 100;
-  const peakPct = norm(peakDb) * 100;
+  // Targets (in %)
+  const targetPctRef = useRef(0);
+  targetPctRef.current = norm(rmsDb) * 100;
 
-  // Visual smoothing state
-  const [dispPct, setDispPct] = useState(0);  // displayed RMS %
-  const [tailPct, setTailPct] = useState(0);  // afterglow tail %
+  // Displayed bar (fast, smooth — but won’t collapse unless near silence)
+  const [dispPct, setDispPct] = useState(0);
+
+  // Peak line (independent hold+fall)
+  const [peakLinePct, setPeakLinePct] = useState(0);
+  const lastPeakHoldTsRef = useRef(0);
+
+  // Animation
   const rafRef = useRef(null);
   const lastTsRef = useRef(null);
 
-  // Easing loop: fast attack, slower release; tail decays even slower.
   useEffect(() => {
-    const ATTACK_PER_SEC = 12;   // how quickly fill chases rising signal
-    const RELEASE_PER_SEC = 4;   // how quickly fill falls on decreasing signal
-    const TAIL_RELEASE_PER_SEC = 2; // how quickly the tail falls
+    // tuning
+    const BAR_ATTACK_PER_SEC = 40;   // fast attack for near “instant”
+    const BAR_RELEASE_PER_SEC = 25;  // fast release so it doesn’t feel sticky
+    const SILENCE_THRESHOLD_DB = -58; // if below this, allow collapse toward 0%
+    const PEAK_HOLD_MS = 500;        // hold peak ~0.5s before falling
+    const PEAK_FALL_PER_SEC = 160;   // fast fall of peak line
 
     const step = (ts) => {
-      const last = lastTsRef.current ?? ts;
-      const dt = Math.min(0.05, (ts - last) / 1000); // cap dt at 50ms for stability
+      const lastTs = lastTsRef.current ?? ts;
+      const dt = Math.min(0.05, (ts - lastTs) / 1000); // cap at 50ms
       lastTsRef.current = ts;
 
+      const target = targetPctRef.current;
+
+      // ----- BAR (dispPct) -----
       setDispPct((prev) => {
-        const rising = targetRmsPct > prev;
-        const rate = rising ? ATTACK_PER_SEC : RELEASE_PER_SEC;
+        const rising = target > prev;
+        const rate = rising ? BAR_ATTACK_PER_SEC : BAR_RELEASE_PER_SEC;
+
+        // Prevent the bar from collapsing to zero unless we're basically silent
+        const minClamp = rmsDb < SILENCE_THRESHOLD_DB ? 0 : Math.min(prev, target);
+        const effectiveTarget = Math.max(target, minClamp);
+
         const alpha = 1 - Math.exp(-rate * dt);
-        const next = prev + (targetRmsPct - prev) * alpha;
-        return next;
+        return prev + (effectiveTarget - prev) * alpha;
       });
 
-      setTailPct((prevTail) => {
-        // Tail always at least the displayed value, and decays slowly when above it
-        const minTail = Math.max(prevTail, targetRmsPct);
-        const above = minTail > dispPct;
-        if (!above) return dispPct;
-        const alphaTail = 1 - Math.exp(-TAIL_RELEASE_PER_SEC * dt);
-        const nextTail = minTail - (minTail - dispPct) * alphaTail;
-        return nextTail;
+      // ----- PEAK LINE -----
+      setPeakLinePct((prev) => {
+        let next = prev;
+
+        // Rise instantly with bar
+        if (dispPct > prev) {
+          next = dispPct;
+          lastPeakHoldTsRef.current = ts;
+        } else {
+          // After hold period, fall quickly toward bar
+          if (ts - lastPeakHoldTsRef.current > PEAK_HOLD_MS) {
+            const fallAlpha = 1 - Math.exp(-PEAK_FALL_PER_SEC * dt);
+            next = prev + (dispPct - prev) * fallAlpha;
+          }
+        }
+        return next;
       });
 
       rafRef.current = requestAnimationFrame(step);
@@ -52,9 +75,9 @@ function HorizontalMeter({ rmsDb, peakDb }) {
       rafRef.current = null;
       lastTsRef.current = null;
     };
-  }, [targetRmsPct, dispPct]);
+  }, [rmsDb, dispPct]);
 
-  // color logic matching widened sweet spot
+  // Colors (sweet spot widened to -24 dBFS)
   const fillColor = (db) => {
     if (db >= 0) return '#ef4444';
     if (db >= -3) return '#f59e0b';
@@ -73,7 +96,7 @@ function HorizontalMeter({ rmsDb, peakDb }) {
 
   return (
     <div className="w-full">
-      {/* ruler above */}
+      {/* ruler */}
       <div className="relative h-6 mb-1">
         <div className="absolute left-0 right-0 top-1/2 -translate-y-1/2 h-px bg-slate-600/60" />
         {ticks.map((db) => {
@@ -102,6 +125,7 @@ function HorizontalMeter({ rmsDb, peakDb }) {
 
       {/* meter bar */}
       <div className="relative h-7 rounded-md bg-slate-800 border border-slate-700 overflow-hidden">
+        {/* background zones (z-0) */}
         {bgZones.map((z, i) => {
           const left = norm(z.from) * 100;
           const width = (norm(z.to) - norm(z.from)) * 100;
@@ -109,38 +133,39 @@ function HorizontalMeter({ rmsDb, peakDb }) {
             <div
               key={i}
               className="absolute top-0 bottom-0"
-              style={{ left: `${left}%`, width: `${width}%`, backgroundColor: z.color }}
+              style={{ left: `${left}%`, width: `${width}%`, backgroundColor: z.color, zIndex: 0 }}
             />
           );
         })}
 
-        {/* afterglow tail (thin, slightly brighter) */}
+        {/* tail (under fill, subtle glow) (z-1) */}
         <div
           className="absolute inset-y-0 left-0"
           style={{
-            width: `${Math.max(dispPct, tailPct)}%`,
-            background: 'linear-gradient(90deg, rgba(255,255,255,0.08), rgba(255,255,255,0.18))',
-            opacity: 0.55,
-            mixBlendMode: 'screen'
+            width: `${Math.max(dispPct, peakLinePct)}%`,
+            background: 'linear-gradient(90deg, rgba(255,255,255,0.06), rgba(255,255,255,0.14))',
+            opacity: 0.5,
+            mixBlendMode: 'screen',
+            zIndex: 1
           }}
         />
 
-        {/* smooth fill (color from current dB) */}
+        {/* colored fill (always on top of tail) (z-2) */}
         <div
           className="absolute inset-y-0 left-0"
-          style={{ width: `${dispPct}%`, backgroundColor: fillColor(rmsDb) }}
+          style={{ width: `${dispPct}%`, backgroundColor: fillColor(rmsDb), opacity: 0.98, zIndex: 2 }}
         />
 
-        {/* peak marker */}
+        {/* peak line (z-3) */}
         <div
           className="absolute top-0 bottom-0 w-[2px] bg-white/85"
-          style={{ left: `calc(${peakPct}% - 1px)` }}
+          style={{ left: `calc(${peakLinePct}% - 1px)`, zIndex: 3 }}
         />
 
-        {/* clip LED */}
+        {/* clip LED (z-3) */}
         <div
           className="absolute right-1 top-1/2 -translate-y-1/2 h-3 w-3 rounded-full"
-          style={{ backgroundColor: peakDb >= 0 ? '#ef4444' : 'rgba(100,116,139,0.45)' }}
+          style={{ backgroundColor: (peakDb ?? rmsDb) >= 0 ? '#ef4444' : 'rgba(100,116,139,0.45)', zIndex: 3 }}
           title="Clip"
         />
       </div>
@@ -168,6 +193,10 @@ const MicCheck = () => {
   const [recordedBlob, setRecordedBlob] = useState(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [recordingTime, setRecordingTime] = useState(0);
+
+  // Numeric peak (hold)
+  const [peakNumberDb, setPeakNumberDb] = useState(-60);
+  const peakNumberTsRef = useRef(0);
 
   // Email
   const [email, setEmail] = useState('');
@@ -232,14 +261,15 @@ const MicCheck = () => {
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
       mediaStreamRef.current = stream;
 
-      audioContextRef.current = new (window.AudioContext || window.webkitAudioContext)();
-      await audioContextRef.current.resume();
-      const source = audioContextRef.current.createMediaStreamSource(stream);
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      audioContextRef.current = ctx;
+      await ctx.resume();
+      const source = ctx.createMediaStreamSource(stream);
 
       // Optional worklet
       try {
-        await audioContextRef.current.audioWorklet.addModule('/worklets/meter-processor.js');
-        workletNodeRef.current = new AudioWorkletNode(audioContextRef.current, 'meter-processor', {
+        await ctx.audioWorklet.addModule('/worklets/meter-processor.js');
+        workletNodeRef.current = new AudioWorkletNode(ctx, 'meter-processor', {
           numberOfInputs: 1,
           numberOfOutputs: 0
         });
@@ -272,7 +302,7 @@ const MicCheck = () => {
       }
 
       // Analyser fallback
-      analyserRef.current = audioContextRef.current.createAnalyser();
+      analyserRef.current = ctx.createAnalyser();
       analyserRef.current.fftSize = 1024;
       analyserRef.current.smoothingTimeConstant = 0.0;
       source.connect(analyserRef.current);
@@ -302,6 +332,20 @@ const MicCheck = () => {
 
     setAudioLevel(clampedDb);
     setFeedback(getFeedbackMessage(clampedDb));
+
+    // ---- numeric peak hold (holds until higher peak OR 2s timeout) ----
+    const now = performance.now();
+    setPeakNumberDb((prev) => {
+      if (clampedDb > prev) {
+        peakNumberTsRef.current = now;
+        return clampedDb;
+      }
+      if (now - (peakNumberTsRef.current || 0) > 2000) {
+        peakNumberTsRef.current = now;
+        return clampedDb;
+      }
+      return prev;
+    });
 
     if (clampedDb > actualPeakRef.current) {
       actualPeakRef.current = clampedDb;
@@ -598,7 +642,7 @@ const MicCheck = () => {
               </div>
             )}
 
-            {/* Clean horizontal meter with easing + tail */}
+            {/* Meter */}
             <div className="mt-6">
               <HorizontalMeter rmsDb={audioLevel} peakDb={peakLevel} />
 
@@ -608,7 +652,10 @@ const MicCheck = () => {
                   className="px-2 py-1 rounded border"
                   style={{ color: getLevelColor(peakLevel), borderColor: getLevelColor(peakLevel) }}
                 >
-                  Peak: {peakLevel.toFixed(1)} dB
+                  Peak line: {peakLevel.toFixed(1)} dB
+                </span>
+                <span className="px-2 py-1 rounded border border-slate-600 text-slate-200">
+                  Peak (hold): {peakNumberDb.toFixed(1)} dB
                 </span>
               </div>
 
