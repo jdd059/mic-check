@@ -2,8 +2,12 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { Mic, MicOff, Video, VideoOff, Play, Square, Download, Circle, Mail } from 'lucide-react';
 
 /** ======= Horizontal meter (instant bar, peak hold + fast fall, fixed z-order) ======= */
-function HorizontalMeter({ rmsDb, peakDb }) {
-  const norm = (db) => Math.max(0, Math.min(1, (db + 60) / 60)); // -60..0 dBFS -> 0..1
+function HorizontalMeter({ rmsDb, peakDb, floorDb = -60 }) {
+  // Map [floorDb..0] dBFS -> [0..1]
+  const norm = (db) => {
+    const span = 0 - floorDb; // e.g., 60 if floorDb=-60, 40 if floorDb=-40
+    return Math.max(0, Math.min(1, (db - floorDb) / span));
+  };
 
   // Targets (in %)
   const targetPctRef = useRef(0);
@@ -24,7 +28,7 @@ function HorizontalMeter({ rmsDb, peakDb }) {
     // tuning
     const BAR_ATTACK_PER_SEC = 40;   // fast attack for near “instant”
     const BAR_RELEASE_PER_SEC = 25;  // fast release so it doesn’t feel sticky
-    const SILENCE_THRESHOLD_DB = -58; // if below this, allow collapse toward 0%
+    const SILENCE_THRESHOLD_DB = floorDb + 2; // if below ~floor, allow collapse toward 0%
     const PEAK_HOLD_MS = 500;        // hold peak ~0.5s before falling
     const PEAK_FALL_PER_SEC = 160;   // fast fall of peak line
 
@@ -75,7 +79,7 @@ function HorizontalMeter({ rmsDb, peakDb }) {
       rafRef.current = null;
       lastTsRef.current = null;
     };
-  }, [rmsDb, dispPct]);
+  }, [rmsDb, dispPct, floorDb]);
 
   // Colors (sweet spot widened to -24 dBFS)
   const fillColor = (db) => {
@@ -127,8 +131,9 @@ function HorizontalMeter({ rmsDb, peakDb }) {
       <div className="relative h-7 rounded-md bg-slate-800 border border-slate-700 overflow-hidden">
         {/* background zones (z-0) */}
         {bgZones.map((z, i) => {
-          const left = norm(z.from) * 100;
-          const width = (norm(z.to) - norm(z.from)) * 100;
+          const left  = Math.max(0, Math.min(100, ((z.from - floorDb) / (0 - floorDb)) * 100));
+          const right = Math.max(0, Math.min(100, ((z.to   - floorDb) / (0 - floorDb)) * 100));
+          const width = Math.max(0, right - left);
           return (
             <div
               key={i}
@@ -186,7 +191,7 @@ const MicCheck = () => {
   const [isVideoEnabled, setIsVideoEnabled] = useState(false);
   const [videoFeedback, setVideoFeedback] = useState("Click 'Start Video' to check your camera");
   const [hasVideoFrame, setHasVideoFrame] = useState(false);
-  const [usePeakForFill, setUsePeakForFill] = useState(true); // label toggle only
+  const [usePeakForFill, setUsePeakForFill] = useState(true); // label + behavior
 
   // Recording
   const [isRecording, setIsRecording] = useState(false);
@@ -589,6 +594,10 @@ const MicCheck = () => {
   }, [stopAudioAnalysis, stopVideoAnalysis]);
 
   // ---------- UI ----------
+  // Meter source & floor: Peak maps well with floor -60; RMS gets -40 so it travels more
+  const barDb = usePeakForFill ? peakLevel : audioLevel;
+  const meterFloor = usePeakForFill ? -60 : -40;
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 to-slate-800 text-white">
       <div className="container mx-auto px-4 py-8 max-w-5xl">
@@ -619,7 +628,7 @@ const MicCheck = () => {
                     checked={usePeakForFill}
                     onChange={() => setUsePeakForFill((v) => !v)}
                   />
-                  <span className="select-none">{usePeakForFill ? 'Peak fill' : 'RMS fill'}</span>
+                  <span className="select-none">{usePeakForFill ? 'Bar uses Peak' : 'Bar uses RMS'}</span>
                 </label>
               </div>
             </div>
@@ -644,7 +653,7 @@ const MicCheck = () => {
 
             {/* Meter */}
             <div className="mt-6">
-              <HorizontalMeter rmsDb={audioLevel} peakDb={peakLevel} />
+              <HorizontalMeter rmsDb={barDb} peakDb={peakLevel} floorDb={meterFloor} />
 
               <div className="mt-3 flex flex-wrap items-center gap-4 text-sm">
                 <span className="text-slate-400">RMS: {audioLevel.toFixed(1)} dB</span>
@@ -766,7 +775,7 @@ const MicCheck = () => {
             )}
 
             <div className="mt-4 relative w-full rounded-lg overflow-hidden bg-slate-700" style={{ minHeight: '240px', aspectRatio: '16/9' }}>
-              <video ref={videoRef} autoPlay muted playsInline className="absolute inset-0 w-full h-full object-cover" />
+              <video ref={videoRef} autoPlay muted playsInline className="absolute inset-0 w-full h-full object-cover transform -scale-x-100" />
               {!isVideoEnabled || !hasVideoFrame ? (
                 <div className="absolute inset-0 flex items-center justify-center text-slate-300">
                   {isVideoEnabled ? 'Starting camera…' : 'Camera off'}
