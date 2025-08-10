@@ -1,20 +1,21 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { Mic, MicOff, Video, VideoOff, Play, Square, Download, Circle, Mail } from 'lucide-react';
 
-/** ======= Horizontal meter (instant bar, peak hold + fast fall, fixed z-order) ======= */
-function HorizontalMeter({ rmsDb, peakDb, peakHoldDb, floorDb = -60, onResetPeakHold }) {
+/** ======= Horizontal meter (instant bar, peak line + fast fall) ======= */
+function HorizontalMeter({ rmsDb, peakDb, floorDb = -60 }) {
   // Map [floorDb..0] dBFS -> [0..1]
   const norm = (db) => {
-    const span = 0 - floorDb; // e.g., 60 if floorDb=-60, 40 if floorDb=-40
+    const span = 0 - floorDb;
     return Math.max(0, Math.min(1, (db - floorDb) / span));
   };
 
-  // Targets (in %)
+  // Target (in %), fed by prop each render
   const targetPctRef = useRef(0);
   targetPctRef.current = norm(rmsDb) * 100;
 
   // Displayed bar (fast, smooth — but won’t collapse unless near silence)
   const [dispPct, setDispPct] = useState(0);
+  const dispPctRef = useRef(0);
 
   // Peak line (independent hold+fall)
   const [peakLinePct, setPeakLinePct] = useState(0);
@@ -25,46 +26,49 @@ function HorizontalMeter({ rmsDb, peakDb, peakHoldDb, floorDb = -60, onResetPeak
   const lastTsRef = useRef(null);
 
   useEffect(() => {
-    // tuning
-    const BAR_ATTACK_PER_SEC = 40;   // fast attack for near “instant”
-    const BAR_RELEASE_PER_SEC = 25;  // fast release so it doesn’t feel sticky
-    const SILENCE_THRESHOLD_DB = floorDb + 2; // if below ~floor, allow collapse toward 0%
-    const PEAK_HOLD_MS = 500;        // hold peak ~0.5s before falling
-    const PEAK_FALL_PER_SEC = 160;   // fast fall of peak line
+    // tuning — faster & snappier
+    const BAR_ATTACK_PER_SEC = 120;
+    const BAR_RELEASE_PER_SEC = 80;
+    const SILENCE_THRESHOLD_DB = floorDb + 2;
+    const PEAK_HOLD_MS = 500;
+    const PEAK_FALL_PER_SEC = 160;
 
     const step = (ts) => {
       const lastTs = lastTsRef.current ?? ts;
-      const dt = Math.min(0.05, (ts - lastTs) / 1000); // cap at 50ms
+      const dt = Math.min(0.05, (ts - lastTs) / 1000);
       lastTsRef.current = ts;
 
       const target = targetPctRef.current;
 
       // ----- BAR (dispPct) -----
+      let newDispForThisFrame = dispPctRef.current;
       setDispPct((prev) => {
         const rising = target > prev;
         const rate = rising ? BAR_ATTACK_PER_SEC : BAR_RELEASE_PER_SEC;
 
-        // Prevent the bar from collapsing to zero unless we're basically silent
+        // Prevent the bar from collapsing to zero unless basically silent
         const minClamp = rmsDb < SILENCE_THRESHOLD_DB ? 0 : Math.min(prev, target);
         const effectiveTarget = Math.max(target, minClamp);
 
         const alpha = 1 - Math.exp(-rate * dt);
-        return prev + (effectiveTarget - prev) * alpha;
+        const next = prev + (effectiveTarget - prev) * alpha;
+        newDispForThisFrame = next;
+        dispPctRef.current = next;
+        return next;
       });
 
       // ----- PEAK LINE -----
       setPeakLinePct((prev) => {
         let next = prev;
-
-        // Rise instantly with bar
-        if (dispPct > prev) {
-          next = dispPct;
+        // Rise instantly with the bar
+        if (newDispForThisFrame > prev) {
+          next = newDispForThisFrame;
           lastPeakHoldTsRef.current = ts;
         } else {
           // After hold period, fall quickly toward bar
           if (ts - lastPeakHoldTsRef.current > PEAK_HOLD_MS) {
             const fallAlpha = 1 - Math.exp(-PEAK_FALL_PER_SEC * dt);
-            next = prev + (dispPct - prev) * fallAlpha;
+            next = prev + (newDispForThisFrame - prev) * fallAlpha;
           }
         }
         return next;
@@ -73,13 +77,13 @@ function HorizontalMeter({ rmsDb, peakDb, peakHoldDb, floorDb = -60, onResetPeak
       rafRef.current = requestAnimationFrame(step);
     };
 
-    rafRef.current = requestAnimationFrame(step);
+    if (!rafRef.current) rafRef.current = requestAnimationFrame(step);
     return () => {
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
       rafRef.current = null;
       lastTsRef.current = null;
     };
-  }, [rmsDb, dispPct, floorDb]);
+  }, [floorDb]); // single RAF; reads current target via refs
 
   // Colors (sweet spot widened to -24 dBFS; hot begins at -6 dBFS)
   const fillColor = (db) => {
@@ -97,8 +101,7 @@ function HorizontalMeter({ rmsDb, peakDb, peakHoldDb, floorDb = -60, onResetPeak
   ];
 
   const ticks = [-60, -48, -36, -30, -24, -18, -12, -6, -3, 0];
-  // Only mark -24 and -6 above the line; keep 0 below to avoid overlapping the dBFS label
-  const specialUp = new Set([-24, -6]);
+  const specialUp = new Set([-24, -6]); // labels above the line
 
   return (
     <div className="w-full">
@@ -126,13 +129,12 @@ function HorizontalMeter({ rmsDb, peakDb, peakHoldDb, floorDb = -60, onResetPeak
             </div>
           );
         })}
-        {/* Move dBFS to the left to prevent overlap with the 0 dB label */}
         <div className="absolute left-0 -top-4 text-[10px] text-slate-400/70">dBFS</div>
       </div>
 
       {/* meter bar */}
       <div className="relative h-7 rounded-md bg-slate-800 border border-slate-700 overflow-hidden">
-        {/* background zones (z-0) */}
+        {/* background zones */}
         {bgZones.map((z, i) => {
           const left  = Math.max(0, Math.min(100, ((z.from - floorDb) / (0 - floorDb)) * 100));
           const right = Math.max(0, Math.min(100, ((z.to   - floorDb) / (0 - floorDb)) * 100));
@@ -146,13 +148,13 @@ function HorizontalMeter({ rmsDb, peakDb, peakHoldDb, floorDb = -60, onResetPeak
           );
         })}
 
-        {/* hot threshold guide at -6 dBFS (above zones, below fill) */}
+        {/* hot threshold guide at -6 dBFS */}
         <div
           className="absolute top-0 bottom-0 w-[2px] bg-amber-400/60"
           style={{ left: `calc(${norm(-6) * 100}% - 1px)`, zIndex: 2 }}
         />
 
-        {/* tail (under fill, subtle glow) (z-1) */}
+        {/* tail (under fill, subtle glow) */}
         <div
           className="absolute inset-y-0 left-0"
           style={{
@@ -164,36 +166,24 @@ function HorizontalMeter({ rmsDb, peakDb, peakHoldDb, floorDb = -60, onResetPeak
           }}
         />
 
-        {/* colored fill (always on top of tail) (z-3) */}
+        {/* colored fill */}
         <div
           className="absolute inset-y-0 left-0"
           style={{ width: `${dispPct}%`, backgroundColor: fillColor(rmsDb), opacity: 0.98, zIndex: 3 }}
         />
 
-        {/* peak line (z-4) */}
+        {/* peak line */}
         <div
           className="absolute top-0 bottom-0 w-[2px] bg-white/85"
           style={{ left: `calc(${peakLinePct}% - 1px)`, zIndex: 4 }}
         />
 
-        {/* clip LED (z-4) */}
+        {/* clip LED */}
         <div
           className="absolute right-1 top-1/2 -translate-y-1/2 h-3 w-3 rounded-full"
           style={{ backgroundColor: (peakDb ?? rmsDb) >= 0 ? '#ef4444' : 'rgba(100,116,139,0.45)', zIndex: 4 }}
           title="Clip"
         />
-
-        {/* Peak (hold) reset badge — tiny, clickable */}
-        {typeof peakHoldDb === 'number' && (
-          <button
-            type="button"
-            onClick={onResetPeakHold}
-            className="absolute top-0.5 right-5 text-[10px] px-1.5 py-[2px] rounded-md border border-slate-600/70 bg-slate-900/80 text-slate-200/90 z-[5] shadow-sm hover:bg-slate-800/80 hover:border-slate-500/70 active:scale-[0.98] cursor-pointer select-none font-mono tabular-nums"
-            title="Click to reset peak hold"
-          >
-            <span className="inline-block w-[7ch] text-right">{peakHoldDb.toFixed(1)}</span> dB
-          </button>
-        )}
       </div>
     </div>
   );
@@ -202,9 +192,9 @@ function HorizontalMeter({ rmsDb, peakDb, peakHoldDb, floorDb = -60, onResetPeak
 const MicCheck = () => {
   // ---------- State ----------
   const [isListening, setIsListening] = useState(false);
-  const [audioLevel, setAudioLevel] = useState(-60); // RMS-ish (fast)
-  const [rmsAvgDb, setRmsAvgDb] = useState(-60);     // RMS averaged (slow display)
-  const [peakLevel, setPeakLevel] = useState(-60);
+  const [audioLevel, setAudioLevel] = useState(-60); // fast RMS (bar)
+  const [rmsAvgDb, setRmsAvgDb] = useState(-60);     // 0.5s averaged RMS (display)
+  const [peakLevel, setPeakLevel] = useState(-60);   // instantaneous/held peak line number
   const [feedback, setFeedback] = useState("Click 'Start Audio Test' to check your microphone");
   const [audioDevices, setAudioDevices] = useState([]);
   const [videoDevices, setVideoDevices] = useState([]);
@@ -213,7 +203,6 @@ const MicCheck = () => {
   const [isVideoEnabled, setIsVideoEnabled] = useState(false);
   const [videoFeedback, setVideoFeedback] = useState("Click 'Start Video' to check your camera");
   const [hasVideoFrame, setHasVideoFrame] = useState(false);
-  const [usePeakForFill, setUsePeakForFill] = useState(true); // label + behavior
 
   // Recording
   const [isRecording, setIsRecording] = useState(false);
@@ -221,7 +210,7 @@ const MicCheck = () => {
   const [isPlaying, setIsPlaying] = useState(false);
   const [recordingTime, setRecordingTime] = useState(0);
 
-  // Numeric peak (hold)
+  // Max (since reset)
   const [peakNumberDb, setPeakNumberDb] = useState(-60);
 
   // Email
@@ -236,58 +225,74 @@ const MicCheck = () => {
   const audioLevelRef = useRef(-60);
   const workletNodeRef = useRef(null);
   const peakHoldStateRef = useRef({ value: -60, ts: 0 });
-  const peakHoldTimerRef = useRef(null);
   const animationFrameRef = useRef(null);
 
   const rmsAvgRef = useRef(-60);
   const lastAvgTsRef = useRef(0);
 
+  // Tips smoothing & hysteresis
+  const tipsLevelRef = useRef(-60);
+  const lastTipsTsRef = useRef(0);
+  const tipsZoneRef = useRef('quiet'); // 'quiet' | 'green' | 'amber' | 'red'
+
   const videoRef = useRef(null);
   const videoStreamRef = useRef(null);
   const videoAnalysisRef = useRef(null);
-  const actualPeakRef = useRef(-60);
   const maxPeakRef = useRef(-60);
   const mediaRecorderRef = useRef(null);
   const recordingTimerRef = useRef(null);
 
-  // ---------- Reset handlers ----------
-  const resetPeakHold = useCallback(() => {
-    if (peakHoldTimerRef.current) {
-      clearTimeout(peakHoldTimerRef.current);
-      peakHoldTimerRef.current = null;
+  // ---------- Helpers ----------
+  const zoneMessage = (zone) => {
+    switch (zone) {
+      case 'red':   return "🔴 Clipping detected! Lower your gain or back away from the mic";
+      case 'amber': return "🟠 Getting hot - try lowering your gain a bit";
+      case 'green': return "🟢 In the sweet spot — you're ready to record";
+      default:      return "🔇 Very quiet - check mic and gain settings";
     }
-    // Drop max to baseline and wait for next peak
-    maxPeakRef.current = -60;
-    setPeakNumberDb(-60);
+  };
+
+  const updateTips = useCallback((instantDb, nowTs) => {
+    // Fast EWMA (~250ms)
+    const TIPS_TAU = 0.25;
+    const dt = (nowTs - (lastTipsTsRef.current || nowTs)) / 1000;
+    lastTipsTsRef.current = nowTs;
+    const alpha = 1 - Math.exp(-((dt || 0.016) / TIPS_TAU));
+    const nextLevel = tipsLevelRef.current + (instantDb - tipsLevelRef.current) * alpha;
+    tipsLevelRef.current = nextLevel;
+
+    // Hysteresis (±1 dB around boundaries)
+    const HYS = 1;
+    const last = tipsZoneRef.current;
+    let next = last;
+
+    const toGreen = () => (nextLevel >= -24 + HYS);
+    const toAmber = () => (nextLevel >= -6 + HYS);
+    const toRed   = () => (nextLevel >= 0 + HYS);
+
+    const backToAmber = () => (nextLevel <= 0 - HYS);
+    const backToGreen = () => (nextLevel <= -6 - HYS);
+    const backToQuiet = () => (nextLevel <= -24 - HYS);
+
+    if (last === 'quiet') {
+      if (toGreen()) next = 'green';
+    } else if (last === 'green') {
+      if (toAmber()) next = 'amber';
+      else if (backToQuiet()) next = 'quiet';
+    } else if (last === 'amber') {
+      if (toRed()) next = 'red';
+      else if (backToGreen()) next = 'green';
+    } else if (last === 'red') {
+      if (backToAmber()) next = 'amber';
+    }
+
+    if (next !== last) {
+      tipsZoneRef.current = next;
+      setFeedback(zoneMessage(next));
+    }
   }, []);
 
-  // ---------- Helpers ----------
-  const getLevelColor = (level) => {
-    if (level >= 0) return '#ef4444';
-    if (level >= -6) return '#f97316';
-    if (level >= -24) return '#22c55e';
-    return '#64748b';
-  };
-
-  const getFeedbackMessage = (level) => {
-    if (level >= 0) return "🔴 Clipping detected! Lower your gain or back away from the mic";
-    if (level >= -6) return "🟠 Getting hot - try lowering your gain a bit";
-    if (level >= -24) return "🟢 In the sweet spot — you're ready to record";
-    if (level >= -36) return "🟡 A bit quiet - get closer or raise gain";
-    return "🔇 Very quiet - check mic and gain settings";
-  };
-
-  const getVideoFeedback = (brightness, hasDetection) => {
-    if (!hasDetection) return "🎥 Camera active - position your face in the center";
-    if (brightness < 50) return "💡 Too dark - try facing a window or adding front lighting";
-    if (brightness > 200) return "☀️ Too bright - reduce lighting or move away from bright backgrounds";
-    return "✅ Good lighting and framing!";
-  };
-
-  /**
-   * ================ AUDIO METER LOOP (stable + safe) ================
-   * Wrapped in useCallback so hooks linter is satisfied; uses refs only.
-   */
+  /** ================ AUDIO METER LOOP (stable + safe) ================ */
   const analyzeAudio = useCallback(() => {
     const analyser = analyserRef.current;
     if (!analyser) return;
@@ -313,27 +318,25 @@ const MicCheck = () => {
       const now = performance.now();
       const dt = (now - (lastAvgTsRef.current || now)) / 1000;
       lastAvgTsRef.current = now;
-      const TAU = 0.5;
-      const alphaAvg = 1 - Math.exp(-(dt || 0.016) / TAU);
+      const AVG_TAU = 0.5;
+      const alphaAvg = 1 - Math.exp(-(dt || 0.016) / AVG_TAU);
       const newAvg = rmsAvgRef.current + (clampedDb - rmsAvgRef.current) * alphaAvg;
       rmsAvgRef.current = newAvg;
       setRmsAvgDb(newAvg);
 
-      // Use averaged RMS for feedback to prevent jitter
-      setFeedback(getFeedbackMessage(newAvg));
+      // Tips: fast smoothing + hysteresis
+      updateTips(clampedDb, now);
 
-      // ---- numeric/visual peak fall-back (approximate using RMS when worklet missing) ----
       // Update numeric Max (since last reset)
       if (clampedDb > maxPeakRef.current) {
         maxPeakRef.current = clampedDb;
         setPeakNumberDb(clampedDb);
       }
 
-      // Update 'peak line' numeric using instantaneous fallback
+      // Peak line numeric (fallback)
       setPeakLevel(clampedDb);
     } catch (err) {
       console.error('Audio analysis failed:', err);
-      // Stop this loop safely without needing stopAudioAnalysis (keeps linter happy)
       if (animationFrameRef.current) {
         cancelAnimationFrame(animationFrameRef.current);
         animationFrameRef.current = null;
@@ -344,13 +347,12 @@ const MicCheck = () => {
     }
 
     animationFrameRef.current = requestAnimationFrame(analyzeAudio);
-  }, []); // only refs + stable setters used
+  }, [updateTips]);
 
   // ---------- AUDIO ----------
   const startAudioAnalysis = useCallback(async () => {
     try {
       setPeakLevel(-60);
-      actualPeakRef.current = -60;
 
       const constraints = {
         audio: {
@@ -386,32 +388,33 @@ const MicCheck = () => {
           lastTsRef.current = now;
 
           // Fast-ish RMS for the bar/logic
-          const releasePerSec = 90;
+          const releasePerSec = 120; // slightly faster decay to feel responsive
           const current = audioLevelRef.current ?? floor;
           const target = Math.max(rmsDb, floor);
           const next = target > current ? target : Math.max(target, current - releasePerSec * dt);
           audioLevelRef.current = next;
           setAudioLevel(next);
 
-          // Slow RMS for the numeric readout (EWMA ~0.5s)
-          const TAU = 0.5; // seconds
-          const alphaAvg = 1 - Math.exp(-(dt || 0.016) / TAU);
+          // Slow RMS (display)
+          const AVG_TAU = 0.5;
+          const alphaAvg = 1 - Math.exp(-(dt || 0.016) / AVG_TAU);
           const newAvg = rmsAvgRef.current + (next - rmsAvgRef.current) * alphaAvg;
           rmsAvgRef.current = newAvg;
           setRmsAvgDb(newAvg);
 
-          // Use averaged RMS for feedback to prevent jitter
-          setFeedback(getFeedbackMessage(newAvg));
+          // Tips
+          updateTips(next, now);
 
-          // Peak hold state (worklet-provided true peaks)
-          const holdTime = 1500; // ms
+          // Peak line from worklet
+          const holdTime = 1500; // ms (internal visual hold)
           const prev = peakHoldStateRef.current?.value ?? floor;
           const prevTs = peakHoldStateRef.current?.ts ?? 0;
           if (peakDb > prev || now - prevTs > holdTime) {
             peakHoldStateRef.current = { value: peakDb, ts: now };
           }
           setPeakLevel(Math.max(peakHoldStateRef.current.value, floor));
-          // Update numeric Max (since last reset)
+
+          // Max since reset
           if (typeof peakDb === 'number' && peakDb > maxPeakRef.current) {
             maxPeakRef.current = peakDb;
             setPeakNumberDb(peakDb);
@@ -427,13 +430,18 @@ const MicCheck = () => {
       analyserRef.current.smoothingTimeConstant = 0.0;
       source.connect(analyserRef.current);
 
+      // Start loop
       setIsListening(true);
       analyzeAudio();
+
+      // Initial tips zone message (avoid stale default)
+      tipsZoneRef.current = 'quiet';
+      setFeedback("🔇 Very quiet - check mic and gain settings");
     } catch (error) {
       console.error('Error accessing microphone:', error);
       setFeedback("❌ Couldn't access your microphone. Please check permissions.");
     }
-  }, [selectedAudioDevice, analyzeAudio]);
+  }, [selectedAudioDevice, analyzeAudio, updateTips]);
 
   const stopAudioAnalysis = useCallback(() => {
     if (animationFrameRef.current) {
@@ -455,18 +463,16 @@ const MicCheck = () => {
       try { audioContextRef.current.close(); } catch {}
       audioContextRef.current = null;
     }
-    if (peakHoldTimerRef.current) {
-      clearTimeout(peakHoldTimerRef.current);
-      peakHoldTimerRef.current = null;
-    }
     analyserRef.current = null;
+
     setIsListening(false);
     setAudioLevel(-60);
     setRmsAvgDb(-60);
     setPeakLevel(-60);
     setPeakNumberDb(-60);
-    actualPeakRef.current = -60;
     rmsAvgRef.current = -60;
+    tipsLevelRef.current = -60;
+    tipsZoneRef.current = 'quiet';
     setFeedback("Click 'Start Audio Test' to check your microphone");
   }, []);
 
@@ -552,7 +558,9 @@ const MicCheck = () => {
       }
       const avg = total / (data.length / 4);
       setHasVideoFrame(true);
-      setVideoFeedback(getVideoFeedback(avg, true));
+      setVideoFeedback(avg < 50 ? "💡 Too dark - try facing a window or adding front lighting"
+        : avg > 200 ? "☀️ Too bright - reduce lighting or move away from bright backgrounds"
+        : "✅ Good lighting and framing!");
     } catch (err) {
       console.warn('Video analysis draw failed:', err?.name || err);
     }
@@ -666,9 +674,8 @@ const MicCheck = () => {
   }, [stopAudioAnalysis, stopVideoAnalysis]);
 
   // ---------- UI ----------
-  // Meter source & floor: Peak maps well with floor -60; RMS gets -40 so it travels more
-  const barDb = usePeakForFill ? peakLevel : audioLevel;
-  const meterFloor = usePeakForFill ? -60 : -40;
+  const barDb = audioLevel;   // RMS drives the bar
+  const meterFloor = -40;     // more travel for RMS
 
   // Little helper for fixed-width numeric tokens (prevents layout shift)
   const FixedNum = ({ value }) => (
@@ -677,7 +684,6 @@ const MicCheck = () => {
 
   // ---------------- Development sanity checks -----------------
   if (process.env.NODE_ENV === 'development') {
-    // quick one-time check to make sure color split shows
     const _once = (window).__mc_once__;
     if (!_once) {
       (window).__mc_once__ = true;
@@ -715,25 +721,6 @@ const MicCheck = () => {
           <div className="bg-slate-800/50 backdrop-blur rounded-2xl p-6 border border-slate-700">
             <div className="flex items-start justify-between gap-4">
               <h2 className="text-xl font-semibold">Audio</h2>
-              <div className="flex items-center gap-3 text-xs">
-                <span
-                  className={`px-2 py-0.5 rounded-full font-medium select-none ${
-                    usePeakForFill
-                      ? 'bg-green-900/40 text-green-300 border border-green-700/60'
-                      : 'bg-slate-700/60 text-slate-200 border border-slate-500/60'
-                  }`}
-                >
-                  {usePeakForFill ? 'PEAK' : 'RMS'}
-                </span>
-                <label className="inline-flex items-center gap-2 cursor-pointer select-none">
-                  <input
-                    type="checkbox"
-                    checked={usePeakForFill}
-                    onChange={() => setUsePeakForFill((v) => !v)}
-                  />
-                  <span>{usePeakForFill ? 'Bar uses Peak' : 'Bar uses RMS'}</span>
-                </label>
-              </div>
             </div>
 
             {(audioDevices.length > 1) && (
@@ -756,7 +743,19 @@ const MicCheck = () => {
 
             {/* Meter */}
             <div className="mt-6">
-              <HorizontalMeter rmsDb={barDb} peakDb={peakLevel} peakHoldDb={peakNumberDb} floorDb={meterFloor} onResetPeakHold={resetPeakHold} />
+              <HorizontalMeter rmsDb={barDb} peakDb={peakLevel} floorDb={meterFloor} />
+
+              {/* Max (reset) — below meter, right-aligned */}
+              <div className="mt-1 flex justify-end">
+                <button
+                  type="button"
+                  onClick={() => { maxPeakRef.current = -60; setPeakNumberDb(-60); }}
+                  className="text-[10px] px-1.5 py-[2px] rounded-md border border-slate-600/70 bg-slate-900/80 text-slate-200/90 shadow-sm hover:bg-slate-800/80 hover:border-slate-500/70 active:scale-[0.98] cursor-pointer select-none font-mono tabular-nums"
+                  title="Click to reset peak max"
+                >
+                  <span className="inline-block w-[7ch] text-right">{peakNumberDb.toFixed(1)}</span> dB
+                </button>
+              </div>
 
               {/* Readouts with fixed-width numbers to prevent jitter */}
               <div className="mt-3 flex flex-wrap items-center gap-4 text-sm min-h-[2rem]">
@@ -765,9 +764,9 @@ const MicCheck = () => {
                 </span>
                 <span
                   className="inline-flex items-center gap-1 px-2 py-1 rounded border"
-                  style={{ color: getLevelColor(peakLevel), borderColor: getLevelColor(peakLevel) }}
+                  style={{ borderColor: '#cbd5e1', color: '#e2e8f0' }}
                 >
-                  Peak line: <FixedNum value={peakLevel.toFixed(1)} /> dB
+                  Peak: <FixedNum value={peakLevel.toFixed(1)} /> dB
                 </span>
               </div>
 
