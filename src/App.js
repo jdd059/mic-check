@@ -105,15 +105,13 @@ const MicCheck = () => {
           setAudioLevel(next);
 
           // Peak hold (~1.5s)
-          // Peak hold (~1.5s)
-            const holdTime = 1500;
-            const prev = peakHoldStateRef.current?.value ?? floor;
-            const prevTs = peakHoldStateRef.current?.ts ?? 0;
-            if (peakDb > prev || now - prevTs > holdTime) {
-              peakHoldStateRef.current = { value: peakDb, ts: now };
-            }
-            setPeakLevel(Math.max(peakHoldStateRef.current.value, floor));
-
+          const holdTime = 1500;
+          const prev = peakHoldStateRef.current?.value ?? floor;
+          const prevTs = peakHoldStateRef.current?.ts ?? 0;
+          if (peakDb > prev || now - prevTs > holdTime) {
+            peakHoldStateRef.current = { value: peakDb, ts: now };
+          }
+          setPeakLevel(Math.max(peakHoldStateRef.current.value, floor));
         };
       } catch (err) {
         console.warn('AudioWorklet init failed', err);
@@ -152,24 +150,23 @@ const MicCheck = () => {
     setFeedback(getFeedbackMessage(clampedDb));
 
     // Peak w/ hold timer (decay after 2.8s)
-        if (clampedDb > actualPeakRef.current) {
-          actualPeakRef.current = clampedDb;
-          setPeakLevel(clampedDb);
+    if (clampedDb > actualPeakRef.current) {
+      actualPeakRef.current = clampedDb;
+      setPeakLevel(clampedDb);
 
-          if (peakHoldTimerRef.current) clearTimeout(peakHoldTimerRef.current);
-          peakHoldTimerRef.current = setTimeout(() => {
-            actualPeakRef.current = -60;
-            setPeakLevel(-60);
-            peakHoldTimerRef.current = null;
-          }, 2800);
-        }
-
+      if (peakHoldTimerRef.current) clearTimeout(peakHoldTimerRef.current);
+      peakHoldTimerRef.current = setTimeout(() => {
+        actualPeakRef.current = -60;
+        setPeakLevel(-60);
+        peakHoldTimerRef.current = null;
+      }, 2800);
+    }
 
     animationFrameRef.current = requestAnimationFrame(analyzeAudio);
   };
 
   const stopAudioAnalysis = useCallback(() => {
-        if (animationFrameRef.current) {
+    if (animationFrameRef.current) {
       cancelAnimationFrame(animationFrameRef.current);
       animationFrameRef.current = null;
     }
@@ -204,86 +201,87 @@ const MicCheck = () => {
     setPeakLevel(-60);
     actualPeakRef.current = -60;
     setFeedback("Click 'Start Audio Test' to check your microphone");
+  }, []);
 
-
+  // More robust startVideoAnalysis: multiple play() attempts
   const startVideoAnalysis = async () => {
-  try {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: 'user' }
-    });
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'user' }
+      });
 
-    videoStreamRef.current = stream;
+      videoStreamRef.current = stream;
 
-    if (videoRef.current) {
-      const el = videoRef.current;
-      el.srcObject = stream;
+      if (videoRef.current) {
+        const el = videoRef.current;
+        el.srcObject = stream;
+        el.setAttribute('playsinline', 'true');
+        el.muted = true;
 
-      // Make Chrome/Safari happy
-      el.setAttribute('playsinline', 'true');
-      el.muted = true;
+        try {
+          await el.play();
+          console.log('video.play(): immediate OK');
+        } catch (e) {
+          console.warn('video.play(): immediate blocked', e);
+        }
 
-      // Try immediate play
-      try {
-        await el.play();
-      } catch (e) {
-        console.warn('video.play() blocked, retrying…', e);
+        el.onloadeddata = async () => {
+          try { await el.play(); } catch (e) { console.warn('play() after loadeddata failed', e); }
+        };
+
         requestAnimationFrame(async () => {
-          try { await el.play(); } catch (err) { console.warn('Retry play() failed', err); }
+          if (el.paused) {
+            try { await el.play(); } catch (e) { console.warn('rAF retry failed', e); }
+          }
         });
+
+        el.onplaying = () => console.log('Video is playing');
       }
 
-      // Backup metadata handler
-      el.onloadedmetadata = async () => {
-        try { await el.play(); } catch {}
-      };
+      setIsVideoEnabled(true);
+      setTimeout(() => analyzeVideo(), 500);
+    } catch (error) {
+      console.error('Error accessing camera:', error);
+      setVideoFeedback(`❌ Couldn't access your camera: ${error.message}`);
+    }
+  };
+
+  function analyzeVideo() {
+    if (!videoRef.current || !videoRef.current.srcObject || !isVideoEnabled) return;
+
+    // Wait until the video element has enough data
+    if (videoRef.current.readyState < 2) {
+      videoAnalysisRef.current = requestAnimationFrame(analyzeVideo);
+      return;
     }
 
-    setIsVideoEnabled(true);
-    setTimeout(() => analyzeVideo(), 500);
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    canvas.width = 160;
+    canvas.height = 120;
 
-  } catch (error) {
-    console.error('Error accessing camera:', error);
-    setVideoFeedback(`❌ Couldn't access your camera: ${error.message}`);
-  }
-};
+    try {
+      ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
+      const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
 
-function analyzeVideo() {
-  if (!videoRef.current || !videoRef.current.srcObject || !isVideoEnabled) return;
+      let totalBrightness = 0;
+      for (let i = 0; i < data.length; i += 4) {
+        const r = data[i];
+        const g = data[i + 1];
+        const b = data[i + 2];
+        totalBrightness += (r + g + b) / 3;
+      }
 
-  // Wait until the video element has enough data
-  if (videoRef.current.readyState < 2) {
-    videoAnalysisRef.current = requestAnimationFrame(analyzeVideo);
-    return;
-  }
-
-  const canvas = document.createElement('canvas');
-  const ctx = canvas.getContext('2d');
-  canvas.width = 160;
-  canvas.height = 120;
-
-  try {
-    ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
-    const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
-
-    let totalBrightness = 0;
-    for (let i = 0; i < data.length; i += 4) {
-      const r = data[i];
-      const g = data[i + 1];
-      const b = data[i + 2];
-      totalBrightness += (r + g + b) / 3;
+      const avgBrightness = totalBrightness / (data.length / 4);
+      setVideoFeedback(getVideoFeedback(avgBrightness, true));
+    } catch (error) {
+      console.error('Video analysis error:', error);
     }
 
-    const avgBrightness = totalBrightness / (data.length / 4);
-    setVideoFeedback(getVideoFeedback(avgBrightness, true));
-  } catch (error) {
-    console.error('Video analysis error:', error);
+    if (isVideoEnabled) {
+      videoAnalysisRef.current = requestAnimationFrame(analyzeVideo);
+    }
   }
-
-  if (isVideoEnabled) {
-    videoAnalysisRef.current = requestAnimationFrame(analyzeVideo);
-  }
-}
-
 
   const stopVideoAnalysis = useCallback(() => {
     setIsVideoEnabled(false);
@@ -612,7 +610,6 @@ function analyzeVideo() {
                   className="w-full rounded-lg bg-slate-700 object-cover"
                   style={{ minHeight: '240px', maxHeight: '360px', aspectRatio: '16 / 9' }}
                 />
-
                 <div className="absolute inset-4 border-2 border-white/30 rounded-lg pointer-events-none"></div>
               </div>
 
