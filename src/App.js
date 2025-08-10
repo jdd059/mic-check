@@ -203,93 +203,145 @@ const MicCheck = () => {
     setFeedback("Click 'Start Audio Test' to check your microphone");
   }, []);
 
-  // More robust startVideoAnalysis: multiple play() attempts
-  const startVideoAnalysis = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'user' }
-      });
+  // --- VIDEO: start, analyze, stop (robust) ---
 
-      videoStreamRef.current = stream;
-
-      if (videoRef.current) {
-        const el = videoRef.current;
-        el.srcObject = stream;
-        el.setAttribute('playsinline', 'true');
-        el.muted = true;
-
-        try {
-          await el.play();
-          console.log('video.play(): immediate OK');
-        } catch (e) {
-          console.warn('video.play(): immediate blocked', e);
-        }
-
-        el.onloadeddata = async () => {
-          try { await el.play(); } catch (e) { console.warn('play() after loadeddata failed', e); }
-        };
-
-        requestAnimationFrame(async () => {
-          if (el.paused) {
-            try { await el.play(); } catch (e) { console.warn('rAF retry failed', e); }
-          }
-        });
-
-        el.onplaying = () => console.log('Video is playing');
-      }
-
-      setIsVideoEnabled(true);
-      setTimeout(() => analyzeVideo(), 500);
-    } catch (error) {
-      console.error('Error accessing camera:', error);
-      setVideoFeedback(`❌ Couldn't access your camera: ${error.message}`);
+const startVideoAnalysis = async () => {
+  try {
+    // 1) Release any previous video first
+    if (videoAnalysisRef.current) {
+      cancelAnimationFrame(videoAnalysisRef.current);
+      videoAnalysisRef.current = null;
     }
-  };
+    if (videoStreamRef.current) {
+      try { videoStreamRef.current.getTracks().forEach(t => t.stop()); } catch {}
+      videoStreamRef.current = null;
+    }
 
-  function analyzeVideo() {
-    if (!videoRef.current || !videoRef.current.srcObject || !isVideoEnabled) return;
+    // 2) Request video only (no audio, so we don't collide with the mic stream)
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } },
+      audio: false
+    });
 
-    // Wait until the video element has enough data
-    if (videoRef.current.readyState < 2) {
-      videoAnalysisRef.current = requestAnimationFrame(analyzeVideo);
+    videoStreamRef.current = stream;
+
+    // 3) Wire up the <video> element carefully
+    const el = videoRef.current;
+    if (!el) {
+      setVideoFeedback("❌ Video element not found.");
       return;
     }
 
-    const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d');
-    canvas.width = 160;
-    canvas.height = 120;
+    // Clear then attach stream (prevents stale attachment issues)
+    el.srcObject = null;
+    el.autoplay = true;                // React prop also set, but set it here too
+    el.muted = true;                   // Required for autoplay in Chrome
+    el.setAttribute('playsinline', ''); // iOS/Chrome mobile
+    el.srcObject = stream;
+    el.load();                         // Ensure readyState resets
 
-    try {
-      ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
-      const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
-
-      let totalBrightness = 0;
-      for (let i = 0; i < data.length; i += 4) {
-        const r = data[i];
-        const g = data[i + 1];
-        const b = data[i + 2];
-        totalBrightness += (r + g + b) / 3;
+    let played = false;
+    const tryPlay = async (label = "initial") => {
+      try {
+        await el.play();
+        played = true;
+      } catch (err) {
+        console.warn(`video.play() ${label} failed:`, err?.name || err);
       }
+    };
 
-      const avgBrightness = totalBrightness / (data.length / 4);
-      setVideoFeedback(getVideoFeedback(avgBrightness, true));
-    } catch (error) {
-      console.error('Video analysis error:', error);
-    }
+    // 4) Multiple chances to start playback
+    await tryPlay("immediate");
 
-    if (isVideoEnabled) {
-      videoAnalysisRef.current = requestAnimationFrame(analyzeVideo);
-    }
+    el.onloadedmetadata = async () => {
+      if (!played) await tryPlay("onloadedmetadata");
+    };
+    el.oncanplay = async () => {
+      if (!played) await tryPlay("oncanplay");
+    };
+    el.onplaying = () => {
+      // We’re live — kick off analysis shortly to ensure frames are available
+      setTimeout(() => {
+        if (isVideoEnabled) analyzeVideo();
+      }, 100);
+    };
+
+    // 5) Mark enabled and kick a delayed analyze in case events don’t fire
+    setIsVideoEnabled(true);
+    setTimeout(() => {
+      if (!played) tryPlay("delayed");
+      analyzeVideo();
+    }, 300);
+
+  } catch (error) {
+    console.error('Error accessing camera:', error);
+    setVideoFeedback(`❌ Couldn't access your camera: ${error.message}`);
+  }
+};
+
+function analyzeVideo() {
+  if (!isVideoEnabled) return;
+  const el = videoRef.current;
+
+  // If no element or no stream, stop trying
+  if (!el || !el.srcObject) {
+    videoAnalysisRef.current = requestAnimationFrame(analyzeVideo);
+    return;
   }
 
-  const stopVideoAnalysis = useCallback(() => {
-    setIsVideoEnabled(false);
-    if (videoAnalysisRef.current) cancelAnimationFrame(videoAnalysisRef.current);
-    if (videoStreamRef.current) videoStreamRef.current.getTracks().forEach((t) => t.stop());
-    if (videoRef.current) videoRef.current.srcObject = null;
-    setVideoFeedback("Click 'Start Video' to check your camera");
-  }, []);
+  // Wait for data to be ready
+  if (el.readyState < 2) { // HAVE_CURRENT_DATA
+    videoAnalysisRef.current = requestAnimationFrame(analyzeVideo);
+    return;
+  }
+
+  // Lightweight brightness check (sufficient for feedback)
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  canvas.width = 160;
+  canvas.height = 120;
+
+  try {
+    ctx.drawImage(el, 0, 0, canvas.width, canvas.height);
+    const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+
+    let total = 0;
+    for (let i = 0; i < data.length; i += 4) {
+      total += (data[i] + data[i + 1] + data[i + 2]) / 3;
+    }
+    const avg = total / (data.length / 4);
+    setVideoFeedback(getVideoFeedback(avg, true));
+  } catch (err) {
+    // If drawing fails, just try again next frame
+    console.warn('Video analysis draw failed:', err?.name || err);
+  }
+
+  videoAnalysisRef.current = requestAnimationFrame(analyzeVideo);
+}
+
+const stopVideoAnalysis = useCallback(() => {
+  setIsVideoEnabled(false);
+  if (videoAnalysisRef.current) {
+    cancelAnimationFrame(videoAnalysisRef.current);
+    videoAnalysisRef.current = null;
+  }
+  try {
+    if (videoStreamRef.current) {
+      videoStreamRef.current.getTracks().forEach((t) => t.stop());
+      videoStreamRef.current = null;
+    }
+  } catch {}
+  if (videoRef.current) {
+    try {
+      videoRef.current.pause();
+      videoRef.current.removeAttribute('src'); // for good measure
+      videoRef.current.srcObject = null;
+      videoRef.current.load();
+    } catch {}
+  }
+  setVideoFeedback("Click 'Start Video' to check your camera");
+}, []);
+
 
   const startRecording = async () => {
     if (!mediaStreamRef.current) {
