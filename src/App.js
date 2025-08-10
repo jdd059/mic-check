@@ -1,24 +1,119 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { Mic, MicOff, Play, Square, Download, Video, VideoOff, Mail } from 'lucide-react';
+import { Mic, MicOff, Video, VideoOff, Play, Square, Download, Circle, Mail } from 'lucide-react';
+
+/** ======= Vertical segmented meter (Logic-ish) with labels & ruler ======= */
+function VerticalMeter({ rmsDb, peakDb }) {
+  // Map -60..0 dB to 0..1
+  const norm = (db) => Math.max(0, Math.min(1, (db + 60) / 60));
+  const litFrac = norm(rmsDb);
+  const peakFrac = norm(peakDb);
+
+  // Segments: 30 rows => 2 dB per segment from -60 .. 0
+  const segments = 30;
+  const dbPerSeg = 60 / segments; // 2
+  // For each segment i (0 bottom .. 29 top)
+  const segs = Array.from({ length: segments }, (_, i) => {
+    const fracFromBottom = (i + 1) / segments;        // 0..1
+    const dbTop = -60 + fracFromBottom * 60;          // top edge dB for this segment
+    const isLit = fracFromBottom <= litFrac + 1e-6;
+
+    // Colors similar to Logic bands
+    let color = '#4ade80'; // green
+    if (dbTop < -18) color = '#64748b'; // low range
+    if (dbTop >= -3) color = '#f59e0b'; // amber near top
+
+    return { isLit, color, dbTop: Math.round(dbTop) };
+  });
+
+  // Peak marker position
+  const peakY = (1 - peakFrac) * 100;
+
+  // Right-side ruler ticks
+  const majorTicks = [-60, -48, -36, -24, -18, -12, -6, -3, 0];
+
+  return (
+    <div className="inline-flex items-stretch select-none">
+      {/* Meter body */}
+      <div className="relative h-64 w-10 rounded-md bg-slate-800 border border-slate-700 overflow-hidden">
+        {/* segments */}
+        <div className="absolute inset-1 grid" style={{ gridTemplateRows: `repeat(${segments}, 1fr)` }}>
+          {segs.map((s, i) => (
+            <div key={i} className="relative mx-0.5 my-[1px] rounded-sm"
+                 style={{
+                   backgroundColor: s.isLit ? s.color : 'rgba(100,116,139,0.25)',
+                   boxShadow: s.isLit ? 'inset 0 0 0 1px rgba(255,255,255,0.08)' : 'none'
+                 }}>
+              {/* per-segment dB label (tiny, faint) */}
+              <div className="absolute left-0.5 top-1/2 -translate-y-1/2 text-[9px] leading-none text-slate-300/40">
+                {s.dbTop}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* peak-hold marker */}
+        <div className="absolute left-0 right-0 h-[2px] bg-white/70"
+             style={{ top: `calc(${peakY}% - 1px)` }} />
+
+        {/* clip LED at top */}
+        <div className="absolute left-1 right-1 top-1 h-1.5 rounded-sm"
+             style={{ backgroundColor: peakDb >= 0 ? '#ef4444' : 'rgba(100,116,139,0.35)' }} />
+      </div>
+
+      {/* Right ruler */}
+      <div className="relative h-64 w-10 ml-2">
+        {/* vertical spine */}
+        <div className="absolute left-1/2 -translate-x-1/2 top-0 bottom-0 w-px bg-slate-600/60" />
+        {majorTicks.map((db) => {
+          const y = (1 - norm(db)) * 100;
+          const isSpecial = db === -3 || db === 0;
+          return (
+            <div key={db} className="absolute left-0 right-0"
+                 style={{ top: `calc(${y}% - 8px)` }}>
+              {/* tick line */}
+              <div className="absolute left-1/2 -translate-x-1/2 h-[1px] w-5 bg-slate-400/70" />
+              {/* label */}
+              <div className={`absolute left-[60%] -translate-x-0 text-[11px] leading-none
+                               ${isSpecial ? 'text-white' : 'text-slate-300/80'}`}>
+                {db}
+              </div>
+            </div>
+          );
+        })}
+        {/* axis labels */}
+        <div className="absolute bottom-0 left-0 right-0 text-center text-[10px] text-slate-400/70">dBFS</div>
+      </div>
+    </div>
+  );
+}
+ç
 
 const MicCheck = () => {
+  // ---------- State ----------
   const [isListening, setIsListening] = useState(false);
-  const [audioLevel, setAudioLevel] = useState(-60);
+  const [audioLevel, setAudioLevel] = useState(-60); // RMS-ish
   const [peakLevel, setPeakLevel] = useState(-60);
+  const [feedback, setFeedback] = useState("Click 'Start Audio Test' to check your microphone");
+  const [audioDevices, setAudioDevices] = useState([]);
+  const [videoDevices, setVideoDevices] = useState([]);
+  const [selectedAudioDevice, setSelectedAudioDevice] = useState('');
+  const [selectedVideoDevice, setSelectedVideoDevice] = useState('');
+  const [isVideoEnabled, setIsVideoEnabled] = useState(false);
+  const [videoFeedback, setVideoFeedback] = useState("Click 'Start Video' to check your camera");
+  const [hasVideoFrame, setHasVideoFrame] = useState(false);
+  const [usePeakForFill, setUsePeakForFill] = useState(true);
+
+  // Recording
   const [isRecording, setIsRecording] = useState(false);
   const [recordedBlob, setRecordedBlob] = useState(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [recordingTime, setRecordingTime] = useState(0);
-  const [feedback, setFeedback] = useState("Click 'Start Audio Test' to check your microphone");
-  const [audioDevices, setAudioDevices] = useState([]);
-  const [selectedAudioDevice, setSelectedAudioDevice] = useState('');
-  const [isVideoEnabled, setIsVideoEnabled] = useState(false);
-  const [videoFeedback, setVideoFeedback] = useState("Click 'Start Video' to check your camera");
+
+  // Email
   const [email, setEmail] = useState('');
   const [emailSubmitted, setEmailSubmitted] = useState(false);
-  const [usePeakForFill, setUsePeakForFill] = useState(true);
-  const [hasVideoFrame, setHasVideoFrame] = useState(false); // NEW: so the box shows even before frames
 
+  // ---------- Refs ----------
   const audioContextRef = useRef(null);
   const analyserRef = useRef(null);
   const mediaStreamRef = useRef(null);
@@ -27,15 +122,16 @@ const MicCheck = () => {
   const workletNodeRef = useRef(null);
   const peakHoldStateRef = useRef({ value: -60, ts: 0 });
   const peakHoldTimerRef = useRef(null);
-  const mediaRecorderRef = useRef(null);
   const animationFrameRef = useRef(null);
-  const recordingTimerRef = useRef(null);
 
   const videoRef = useRef(null);
   const videoStreamRef = useRef(null);
   const videoAnalysisRef = useRef(null);
   const actualPeakRef = useRef(-60);
+  const mediaRecorderRef = useRef(null);
+  const recordingTimerRef = useRef(null);
 
+  // ---------- Helpers ----------
   const getLevelColor = (level) => {
     if (level >= 0) return '#ef4444';
     if (level >= -3) return '#f97316';
@@ -58,9 +154,8 @@ const MicCheck = () => {
     return "✅ Good lighting and framing!";
   };
 
-  // ---------------- AUDIO ----------------
-
-  const startAudioAnalysis = async () => {
+  // ---------- AUDIO ----------
+  const startAudioAnalysis = useCallback(async () => {
     try {
       setPeakLevel(-60);
       actualPeakRef.current = -60;
@@ -69,28 +164,25 @@ const MicCheck = () => {
         audio: {
           echoCancellation: false,
           noiseSuppression: false,
-          autoGainControl: false
+          autoGainControl: false,
+          ...(selectedAudioDevice ? { deviceId: { exact: selectedAudioDevice } } : {})
         }
       };
 
-      if (selectedAudioDevice) {
-        constraints.audio.deviceId = { exact: selectedAudioDevice };
-      }
-
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
-
       mediaStreamRef.current = stream;
+
       audioContextRef.current = new (window.AudioContext || window.webkitAudioContext)();
       await audioContextRef.current.resume();
       const source = audioContextRef.current.createMediaStreamSource(stream);
 
+      // Try AudioWorklet (optional)
       try {
         await audioContextRef.current.audioWorklet.addModule('/worklets/meter-processor.js');
-        workletNodeRef.current = new AudioWorkletNode(
-          audioContextRef.current,
-          'meter-processor',
-          { numberOfInputs: 1, numberOfOutputs: 0 }
-        );
+        workletNodeRef.current = new AudioWorkletNode(audioContextRef.current, 'meter-processor', {
+          numberOfInputs: 1,
+          numberOfOutputs: 0
+        });
         source.connect(workletNodeRef.current);
         workletNodeRef.current.port.onmessage = (e) => {
           const { rmsDb, peakDb } = e.data;
@@ -116,13 +208,13 @@ const MicCheck = () => {
           setPeakLevel(Math.max(peakHoldStateRef.current.value, floor));
         };
       } catch (err) {
+        // fallback to analyser below
         console.warn('AudioWorklet init failed', err);
       }
 
       analyserRef.current = audioContextRef.current.createAnalyser();
       analyserRef.current.fftSize = 1024;
       analyserRef.current.smoothingTimeConstant = 0.0;
-
       source.connect(analyserRef.current);
 
       setIsListening(true);
@@ -131,7 +223,7 @@ const MicCheck = () => {
       console.error('Error accessing microphone:', error);
       setFeedback("❌ Couldn't access your microphone. Please check permissions.");
     }
-  };
+  }, [selectedAudioDevice]);
 
   const analyzeAudio = () => {
     if (!analyserRef.current) return;
@@ -171,7 +263,6 @@ const MicCheck = () => {
       cancelAnimationFrame(animationFrameRef.current);
       animationFrameRef.current = null;
     }
-
     if (workletNodeRef.current) {
       try {
         workletNodeRef.current.port.onmessage = null;
@@ -179,22 +270,18 @@ const MicCheck = () => {
       } catch {}
       workletNodeRef.current = null;
     }
-
     if (mediaStreamRef.current) {
       mediaStreamRef.current.getTracks().forEach(t => t.stop());
       mediaStreamRef.current = null;
     }
-
     if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
       try { audioContextRef.current.close(); } catch {}
       audioContextRef.current = null;
     }
-
     if (peakHoldTimerRef.current) {
       clearTimeout(peakHoldTimerRef.current);
       peakHoldTimerRef.current = null;
     }
-
     setIsListening(false);
     setAudioLevel(-60);
     setPeakLevel(-60);
@@ -202,11 +289,9 @@ const MicCheck = () => {
     setFeedback("Click 'Start Audio Test' to check your microphone");
   }, []);
 
-  // ---------------- VIDEO (robust) ----------------
-
+  // ---------- VIDEO ----------
   const startVideoAnalysis = async () => {
     try {
-      // Clean slate
       setHasVideoFrame(false);
       if (videoAnalysisRef.current) {
         cancelAnimationFrame(videoAnalysisRef.current);
@@ -217,13 +302,17 @@ const MicCheck = () => {
         videoStreamRef.current = null;
       }
 
-      // Ask for VIDEO only
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } },
+      const constraints = {
+        video: {
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+          ...(selectedVideoDevice ? { deviceId: { exact: selectedVideoDevice } } : { facingMode: 'user' })
+        },
         audio: false
-      });
+      };
 
-      setIsVideoEnabled(true); // set early so analyze guard passes
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      setIsVideoEnabled(true);
       videoStreamRef.current = stream;
 
       const el = videoRef.current;
@@ -231,41 +320,22 @@ const MicCheck = () => {
         setVideoFeedback("❌ Video element not found.");
         return;
       }
-
-      // Attributes before stream
       el.autoplay = true;
       el.muted = true;
       el.setAttribute('playsinline', '');
-      el.srcObject = null;
       el.srcObject = stream;
       el.load();
 
       let played = false;
-      const tryPlay = async (label) => {
+      const tryPlay = async () => {
         try {
           await el.play();
           played = true;
-          // kick analysis
-          setTimeout(() => analyzeVideo(), 100);
-        } catch (err) {
-          console.warn(`video.play() ${label} failed:`, err?.name || err);
-        }
+          setTimeout(() => analyzeVideo(), 120);
+        } catch {}
       };
-
-      await tryPlay('immediate');
-      el.onloadedmetadata = () => { if (!played) tryPlay('onloadedmetadata'); };
-      el.oncanplay = () => { if (!played) tryPlay('oncanplay'); };
-      el.onplaying = () => {
-        if (!played) tryPlay('onplaying');
-        setTimeout(() => analyzeVideo(), 120);
-      };
-
-      // last resort
-      setTimeout(() => {
-        if (!played) tryPlay('delayed');
-        analyzeVideo();
-      }, 400);
-
+      await tryPlay();
+      setTimeout(() => { if (!played) tryPlay(); analyzeVideo(); }, 400);
     } catch (error) {
       console.error('Error accessing camera:', error);
       setVideoFeedback(`❌ Couldn't access your camera: ${error.message}`);
@@ -281,8 +351,7 @@ const MicCheck = () => {
       videoAnalysisRef.current = requestAnimationFrame(analyzeVideo);
       return;
     }
-
-    if (el.readyState < 2) { // HAVE_CURRENT_DATA
+    if (el.readyState < 2) {
       videoAnalysisRef.current = requestAnimationFrame(analyzeVideo);
       return;
     }
@@ -334,41 +403,25 @@ const MicCheck = () => {
     setVideoFeedback("Click 'Start Video' to check your camera");
   }, []);
 
-  // ---------------- RECORDING ----------------
-
+  // ---------- RECORDING ----------
   const startRecording = async () => {
     if (!mediaStreamRef.current) {
       await startAudioAnalysis();
     }
-
     try {
-      mediaRecorderRef.current = new MediaRecorder(mediaStreamRef.current, {
-        mimeType: 'audio/webm'
-      });
-
+      mediaRecorderRef.current = new MediaRecorder(mediaStreamRef.current, { mimeType: 'audio/webm' });
       const chunks = [];
-      mediaRecorderRef.current.ondataavailable = (event) => {
-        if (event.data.size > 0) chunks.push(event.data);
-      };
-
+      mediaRecorderRef.current.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
       mediaRecorderRef.current.onstop = () => {
         const blob = new Blob(chunks, { type: 'audio/webm' });
         setRecordedBlob(blob);
         mediaRecorderRef.current = null;
       };
-
       mediaRecorderRef.current.start();
       setIsRecording(true);
       setRecordingTime(0);
-
       recordingTimerRef.current = setInterval(() => {
-        setRecordingTime((prev) => {
-          if (prev >= 4.9) {
-            stopRecording();
-            return 5;
-          }
-          return prev + 0.1;
-        });
+        setRecordingTime((prev) => prev + 0.1);
       }, 100);
     } catch (error) {
       console.error('Error starting recording:', error);
@@ -380,7 +433,6 @@ const MicCheck = () => {
     if (mediaRecorderRef.current && isRecording) mediaRecorderRef.current.stop();
     if (recordingTimerRef.current) clearInterval(recordingTimerRef.current);
     setIsRecording(false);
-    setRecordingTime(0);
   };
 
   const playRecording = () => {
@@ -403,83 +455,54 @@ const MicCheck = () => {
     }
   };
 
-  const handleEmailSubmit = async (e) => {
-    e.preventDefault();
-    if (email) {
-      try {
-        const emails = JSON.parse(localStorage.getItem('micCheckEmails') || '[]');
-        emails.push({ email, date: new Date().toISOString() });
-        localStorage.setItem('micCheckEmails', JSON.stringify(emails));
-        setEmailSubmitted(true);
-        setEmail('');
-      } catch (error) {
-        console.error('Error saving email:', error);
-      }
-    }
-  };
-
-  // ---------------- EFFECTS ----------------
-
+  // ---------- EFFECTS (devices) ----------
   useEffect(() => {
-    const getAudioDevices = async () => {
+    const getDevices = async () => {
       try {
         const devices = await navigator.mediaDevices.enumerateDevices();
         const audioInputs = devices.filter((d) => d.kind === 'audioinput');
+        const videoInputs = devices.filter((d) => d.kind === 'videoinput');
         setAudioDevices(audioInputs);
-        if (audioInputs.length > 0 && !selectedAudioDevice) {
-          setSelectedAudioDevice(audioInputs[0].deviceId);
-        }
+        setVideoDevices(videoInputs);
+        if (audioInputs.length > 0 && !selectedAudioDevice) setSelectedAudioDevice(audioInputs[0].deviceId);
+        if (videoInputs.length > 0 && !selectedVideoDevice) setSelectedVideoDevice(videoInputs[0].deviceId);
       } catch (error) {
-        console.error('Error getting audio devices:', error);
+        console.error('Error getting devices:', error);
       }
     };
+    getDevices();
+    navigator.mediaDevices.addEventListener('devicechange', getDevices);
+    return () => navigator.mediaDevices.removeEventListener('devicechange', getDevices);
+  }, [selectedAudioDevice, selectedVideoDevice]);
 
-    getAudioDevices();
-    navigator.mediaDevices.addEventListener('devicechange', getAudioDevices);
-
+  // Cleanup on unmount
+  useEffect(() => {
     return () => {
       stopAudioAnalysis();
       stopVideoAnalysis();
       if (recordingTimerRef.current) clearInterval(recordingTimerRef.current);
-      navigator.mediaDevices.removeEventListener('devicechange', getAudioDevices);
     };
-  }, [selectedAudioDevice, stopAudioAnalysis, stopVideoAnalysis]);
+  }, [stopAudioAnalysis, stopVideoAnalysis]);
 
+  // Horizontal bar (for quick glance), kept from previous build
   const displayLevel = usePeakForFill ? peakLevel : audioLevel;
   const levelWidth = Math.max(0, Math.min(100, (displayLevel + 60) * (100 / 60)));
 
-  // ---------------- UI ----------------
-
+  // ---------- UI ----------
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 to-slate-800 text-white">
-      <div className="container mx-auto px-4 py-8 max-w-2xl">
+      <div className="container mx-auto px-4 py-8 max-w-5xl">
         <div className="text-center mb-8">
           <h1 className="text-4xl font-bold mb-2">Mic Check</h1>
           <p className="text-slate-300 text-lg">Test your audio and video before you record!</p>
         </div>
 
-        <div className="bg-slate-800/50 backdrop-blur rounded-2xl p-8 border border-slate-700">
-          {audioDevices.length > 1 && (
-            <div className="mb-6">
-              <label className="block text-sm font-medium mb-2">Select Microphone</label>
-              <select
-                value={selectedAudioDevice}
-                onChange={(e) => setSelectedAudioDevice(e.target.value)}
-                className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white"
-                disabled={isListening}
-              >
-                {audioDevices.map((device) => (
-                  <option key={device.deviceId} value={device.deviceId}>
-                    {device.label || `Microphone ${device.deviceId.slice(0, 8)}`}
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
-
-          <div className="mb-8">
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-xl font-semibold">Audio Level</h2>
+        {/* Responsive: side-by-side on md+ */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+          {/* AUDIO CARD */}
+          <div className="bg-slate-800/50 backdrop-blur rounded-2xl p-6 border border-slate-700">
+            <div className="flex items-start justify-between gap-4">
+              <h2 className="text-xl font-semibold">Audio</h2>
               <div className="flex items-center gap-3 text-xs">
                 <span
                   className={`px-2 py-0.5 rounded-full font-medium select-none ${
@@ -490,142 +513,176 @@ const MicCheck = () => {
                 >
                   {usePeakForFill ? 'PEAK' : 'RMS'}
                 </span>
-                <span className="text-slate-400">Bar mode:</span>
                 <label className="inline-flex items-center gap-2 cursor-pointer">
                   <input
                     type="checkbox"
                     checked={usePeakForFill}
                     onChange={() => setUsePeakForFill((v) => !v)}
                   />
-                  <span className="select-none">{usePeakForFill ? 'Peak' : 'RMS'}</span>
+                  <span className="select-none">{usePeakForFill ? 'Peak fill' : 'RMS fill'}</span>
                 </label>
               </div>
-              <div className="flex gap-4 text-sm items-center">
-                <span className="text-slate-400">Current: {audioLevel.toFixed(1)} dB</span>
-                <span
-                  className="px-2 py-1 rounded border"
-                  style={{ color: getLevelColor(peakLevel), borderColor: getLevelColor(peakLevel) }}
+            </div>
+
+            {(audioDevices.length > 1) && (
+              <div className="mt-4">
+                <label className="block text-sm font-medium mb-2">Microphone</label>
+                <select
+                  value={selectedAudioDevice}
+                  onChange={(e) => setSelectedAudioDevice(e.target.value)}
+                  className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white"
+                  disabled={isListening}
                 >
-                  Peak: {peakLevel.toFixed(1)} dB
-                </span>
+                  {audioDevices.map((device) => (
+                    <option key={device.deviceId} value={device.deviceId}>
+                      {device.label || `Microphone ${device.deviceId.slice(0, 8)}`}
+                    </option>
+                  ))}
+                </select>
               </div>
-            </div>
+            )}
 
-            <div className="relative h-24 bg-slate-700 rounded-lg overflow-hidden">
-              {/* Background zones mapped to -60..0 dB */}
-              <div className="absolute inset-0">
-                <div className="absolute left-0 top-0 h-full" style={{ width: '70%', backgroundColor: '#556070' }} />
-                <div className="absolute top-0 h-full" style={{ left: '70%', width: '15%', backgroundColor: 'rgba(16,185,129,0.20)' }} />
-                <div className="absolute top-0 h-full" style={{ left: '85%', width: '10%', backgroundColor: 'rgba(251,146,60,0.20)' }} />
-                <div className="absolute top-0 h-full" style={{ left: '95%', width: '5%', backgroundColor: 'rgba(239,68,68,0.20)' }} />
+            {/* Logic-style meter + numbers */}
+            <div className="mt-6 flex items-center gap-4">
+              <VerticalMeter rmsDb={audioLevel} peakDb={peakLevel} />
+              <div className="flex-1">
+                <div className="flex gap-4 text-sm items-center mb-3">
+                  <span className="text-slate-400">RMS: {audioLevel.toFixed(1)} dB</span>
+                  <span
+                    className="px-2 py-1 rounded border"
+                    style={{ color: getLevelColor(peakLevel), borderColor: getLevelColor(peakLevel) }}
+                  >
+                    Peak: {peakLevel.toFixed(1)} dB
+                  </span>
+                </div>
+
+                {/* quick horizontal bar as secondary readout */}
+                <div className="relative h-6 bg-slate-700 rounded-md overflow-hidden">
+                  <div
+                    className="absolute inset-y-0 left-0 transition-all duration-100 ease-out"
+                    style={{ width: `${levelWidth}%`, backgroundColor: getLevelColor(displayLevel) }}
+                  />
+                </div>
+
+                <div className="mt-4 p-3 bg-slate-700/50 rounded-lg">
+                  <p className="text-sm">{feedback}</p>
+                </div>
+
+                {/* Transport */}
+                <div className="mt-4 flex flex-wrap gap-3">
+                  {!isListening ? (
+                    <button
+                      onClick={startAudioAnalysis}
+                      className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg"
+                    >
+                      <Mic size={18} /> Start Audio Test
+                    </button>
+                  ) : (
+                    <button
+                      onClick={stopAudioAnalysis}
+                      className="flex items-center gap-2 px-4 py-2 bg-red-600 hover:bg-red-700 rounded-lg"
+                    >
+                      <MicOff size={18} /> Stop Audio Test
+                    </button>
+                  )}
+
+                  {!isRecording ? (
+                    <button
+                      onClick={startRecording}
+                      disabled={!isListening}
+                      className="flex items-center gap-2 px-4 py-2 bg-rose-600 hover:bg-rose-700 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      <Circle size={16} /> Record
+                    </button>
+                  ) : (
+                    <button
+                      onClick={stopRecording}
+                      className="flex items-center gap-2 px-4 py-2 bg-amber-600 hover:bg-amber-700 rounded-lg"
+                    >
+                      <Square size={16} /> Stop
+                    </button>
+                  )}
+
+                  <button
+                    onClick={playRecording}
+                    disabled={!recordedBlob || isPlaying}
+                    className="flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    <Play size={16} /> Play
+                  </button>
+
+                  <button
+                    onClick={downloadRecording}
+                    disabled={!recordedBlob}
+                    className="flex items-center gap-2 px-4 py-2 bg-slate-600 hover:bg-slate-700 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    <Download size={16} /> Download
+                  </button>
+
+                  {isRecording && (
+                    <span className="ml-2 text-sm text-slate-300 select-none">
+                      ● {recordingTime.toFixed(1)}s
+                    </span>
+                  )}
+                </div>
               </div>
-
-              {/* Dynamic level bar */}
-              <div
-                className="absolute bottom-0 left-0 transition-all duration-100 ease-out rounded-r"
-                style={{
-                  width: `${levelWidth}%`,
-                  backgroundColor: getLevelColor(displayLevel),
-                  height: '100%',
-                  opacity: 0.9,
-                  mixBlendMode: 'screen'
-                }}
-              />
-
-              {/* Zone markers */}
-              <div className="absolute inset-0 pointer-events-none">
-                <div className="absolute left-[70%] top-0 h-full w-px bg-green-400/50"></div>
-                <div className="absolute left-[85%] top-0 h-full w-px bg-orange-400/50"></div>
-                <div className="absolute left-[95%] top-0 h-full w-px bg-red-400/50"></div>
-              </div>
-            </div>
-
-            {/* Zone labels */}
-            <div className="relative mt-2">
-              <div className="absolute left-0 text-xs text-slate-400">Too Quiet</div>
-              <div className="absolute left-[77.5%] -translate-x-1/2 text-xs text-green-400">Perfect</div>
-              <div className="absolute left-[85%] -translate-x-1/2 text-xs text-orange-400">Hot</div>
-              <div className="absolute right-0 text-xs text-red-400">Clip</div>
             </div>
           </div>
 
-          <div className="mb-8 p-4 bg-slate-700/50 rounded-lg">
-            <p className="text-center text-lg">{feedback}</p>
-          </div>
-
-          <div className="space-y-4">
-            <div className="flex gap-4 justify-center">
-              {!isListening ? (
-                <button
-                  onClick={startAudioAnalysis}
-                  className="flex items-center gap-2 px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors min-w-[160px]"
-                >
-                  <Mic size={20} />
-                  Start Audio Test
-                </button>
-              ) : (
-                <button
-                  onClick={stopAudioAnalysis}
-                  className="flex items-center gap-2 px-6 py-3 bg-red-600 hover:bg-red-700 text-white rounded-lg font-medium transition-colors min-w-[160px]"
-                >
-                  <MicOff size={20} />
-                  Stop Audio Test
-                </button>
-              )}
-
-              {!isVideoEnabled ? (
-                <button
-                  onClick={startVideoAnalysis}
-                  className="flex items-center gap-2 px-6 py-3 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium transition-colors min-w-[160px]"
-                >
-                  <Video size={20} />
-                  Start Video Test
-                </button>
-              ) : (
-                <button
-                  onClick={stopVideoAnalysis}
-                  className="flex items-center gap-2 px-6 py-3 bg-red-600 hover:bg-red-700 text-white rounded-lg font-medium transition-colors min-w-[160px]"
-                >
-                  <VideoOff size={20} />
-                  Stop Video Test
-                </button>
-              )}
-            </div>
-          </div>
-        </div>
-
-        {/* VIDEO CARD: always visible so you see the box */}
-        <div className="mt-8 bg-slate-800/50 backdrop-blur rounded-2xl p-8 border border-slate-700">
-          <h2 className="text-xl font-semibold mb-4">Video Check</h2>
-          <div className="grid md:grid-cols-2 gap-6">
-            <div className="relative">
-              <div className="relative w-full rounded-lg overflow-hidden bg-slate-700" style={{ minHeight: '240px', maxHeight: '360px', aspectRatio: '16 / 9' }}>
-                <video
-                  ref={videoRef}
-                  autoPlay
-                  muted
-                  playsInline
-                  className="absolute inset-0 w-full h-full object-cover"
-                />
-                {!isVideoEnabled || !hasVideoFrame ? (
-                  <div className="absolute inset-0 flex items-center justify-center text-slate-300">
-                    {isVideoEnabled ? 'Starting camera…' : 'Camera off'}
-                  </div>
-                ) : null}
+          {/* VIDEO CARD */}
+          <div className="bg-slate-800/50 backdrop-blur rounded-2xl p-6 border border-slate-700">
+            <div className="flex items-center justify-between">
+              <h2 className="text-xl font-semibold">Video</h2>
+              <div className="flex gap-2">
+                {!isVideoEnabled ? (
+                  <button
+                    onClick={startVideoAnalysis}
+                    className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-700 rounded-lg"
+                  >
+                    <Video size={18} /> Start
+                  </button>
+                ) : (
+                  <button
+                    onClick={stopVideoAnalysis}
+                    className="flex items-center gap-2 px-4 py-2 bg-red-600 hover:bg-red-700 rounded-lg"
+                  >
+                    <VideoOff size={18} /> Stop
+                  </button>
+                )}
               </div>
+            </div>
+
+            {(videoDevices.length > 1) && (
+              <div className="mt-4">
+                <label className="block text-sm font-medium mb-2">Camera</label>
+                <select
+                  value={selectedVideoDevice}
+                  onChange={(e) => setSelectedVideoDevice(e.target.value)}
+                  className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white"
+                  disabled={isVideoEnabled}
+                >
+                  {videoDevices.map((device) => (
+                    <option key={device.deviceId} value={device.deviceId}>
+                      {device.label || `Camera ${device.deviceId.slice(0, 8)}`}
+                    </option>
+                  ))}
+                </select>
+                <p className="text-xs text-slate-400 mt-1">Change camera when video is stopped.</p>
+              </div>
+            )}
+
+            <div className="mt-4 relative w-full rounded-lg overflow-hidden bg-slate-700" style={{ minHeight: '240px', aspectRatio: '16/9' }}>
+              <video ref={videoRef} autoPlay muted playsInline className="absolute inset-0 w-full h-full object-cover" />
+              {!isVideoEnabled || !hasVideoFrame ? (
+                <div className="absolute inset-0 flex items-center justify-center text-slate-300">
+                  {isVideoEnabled ? 'Starting camera…' : 'Camera off'}
+                </div>
+              ) : null}
               <div className="absolute inset-4 border-2 border-white/30 rounded-lg pointer-events-none"></div>
             </div>
 
-            <div className="space-y-4">
-              <div className="p-4 bg-slate-700/50 rounded-lg">
-                <p className="text-lg">{videoFeedback}</p>
-              </div>
-
-              <div className="text-sm text-slate-300 space-y-2">
-                <div><strong className="text-white">Good framing:</strong> Eyes in upper third of frame</div>
-                <div><strong className="text-white">Lighting tips:</strong> Face a window or add soft front light</div>
-                <div><strong className="text-white">Distance:</strong> Arm's length from camera works best</div>
-              </div>
+            <div className="mt-4 p-3 bg-slate-700/50 rounded-lg">
+              <p className="text-sm">{videoFeedback}</p>
             </div>
           </div>
         </div>
@@ -639,6 +696,7 @@ const MicCheck = () => {
               rel="noopener noreferrer"
               className="flex items-center justify-center gap-2 px-6 py-3 bg-[#0077B5] hover:bg-[#005885] text-white rounded-lg font-medium transition-colors"
             >
+              {/* LinkedIn glyph */}
               <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
                 <path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433c-1.144 0-2.063-.926-2.063-2.065 0-1.138.92-2.063 2.063-2.063 1.14 0 2.064.925 2.064 2.063 0 1.139-.925 2.065-2.064 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/>
               </svg>
@@ -659,7 +717,16 @@ const MicCheck = () => {
 
           <div className="max-w-md mx-auto">
             {!emailSubmitted ? (
-              <form onSubmit={handleEmailSubmit} className="flex gap-2">
+              <form onSubmit={(e) => {
+                e.preventDefault();
+                try {
+                  const emails = JSON.parse(localStorage.getItem('micCheckEmails') || '[]');
+                  emails.push({ email, date: new Date().toISOString() });
+                  localStorage.setItem('micCheckEmails', JSON.stringify(emails));
+                  setEmailSubmitted(true);
+                  setEmail('');
+                } catch (error) { console.error('Error saving email:', error); }
+              }} className="flex gap-2">
                 <input
                   type="email"
                   value={email}
@@ -679,28 +746,6 @@ const MicCheck = () => {
             ) : (
               <p className="text-center text-green-400">✓ We'll notify you when the Chrome extension launches!</p>
             )}
-          </div>
-        </div>
-
-        <div className="mt-8 bg-slate-800/30 rounded-lg p-6 border border-slate-700">
-          <h3 className="text-lg font-semibold mb-4">Quick Tips</h3>
-          <div className="grid md:grid-cols-2 gap-4 text-sm text-slate-300">
-            <div>
-              <strong className="text-white">Too quiet?</strong>
-              <p>Move closer to your mic or increase gain</p>
-            </div>
-            <div>
-              <strong className="text-white">Too loud?</strong>
-              <p>Back away from the mic or lower gain</p>
-            </div>
-            <div>
-              <strong className="text-white">No pop filter?</strong>
-              <p>Angle your mic off-axis - raise or lower mic, then angle toward mouth to avoid pops</p>
-            </div>
-            <div>
-              <strong className="text-white">Best distance:</strong>
-              <p>6-8 inches from your mouth for most mics</p>
-            </div>
           </div>
         </div>
 
