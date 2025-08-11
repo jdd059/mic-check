@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { Mic, MicOff, Video, VideoOff, Play, Square, Download, Circle, Mail } from 'lucide-react';
 
 /** ======= Horizontal meter (VU-like smooth bar + responsive peak line) ======= */
-function HorizontalMeter({ rmsDb, peakDb, floorDb = -40 }) {
+function HorizontalMeter({ rmsDb, peakDb, floorDb = -40, onBarDbChange }) {
   // Map [floorDb..0] dBFS -> [0..1]
   const norm = (db) => {
     const span = 0 - floorDb;
@@ -23,6 +23,8 @@ function HorizontalMeter({ rmsDb, peakDb, floorDb = -40 }) {
 
   const rafRef = useRef(null);
   const lastTsRef = useRef(null);
+  const lastSentDbRef = useRef(-60);
+  const lastSentTsRef = useRef(0);
 
   useEffect(() => {
     // Ballistics — close to classic VU feel
@@ -41,9 +43,13 @@ function HorizontalMeter({ rmsDb, peakDb, floorDb = -40 }) {
       // ----- BAR (dispPct) — exponential smoothing -----
       setDispPct((prev) => {
         const rising = fastPct > prev;
-        const tau = rising ? ATTACK_TAU : RELEASE_TAU;
+        const delta = fastPct - prev;
+        const bigTransient = rising && delta > 12;
+        const tau = rising ? (bigTransient ? 0.12 : ATTACK_TAU) : RELEASE_TAU;
         const alpha = 1 - Math.exp(-((dt || 0.016) / tau));
-        const next = prev + (fastPct - prev) * alpha;
+        const SNAP_MAX = 20; // up to 10% width instant jump
+        const boostedPrev = rising ? (prev + Math.min(delta, SNAP_MAX)) : prev;
+        const next = boostedPrev + (fastPct - boostedPrev) * alpha;
         dispPctRef.current = next;
         return next;
       });
@@ -62,6 +68,17 @@ function HorizontalMeter({ rmsDb, peakDb, floorDb = -40 }) {
         return next;
       });
 
+      // Notify parent of displayed bar dB (throttled)
+      if (typeof onBarDbChange === 'function') {
+        const dispDb = floorDb + (dispPctRef.current / 100) * (0 - floorDb);
+        const since = ts - (lastSentTsRef.current || 0);
+        if (since > 100 || Math.abs(dispDb - (lastSentDbRef.current ?? -60)) > 0.5) {
+          lastSentDbRef.current = dispDb;
+          lastSentTsRef.current = ts;
+          onBarDbChange(dispDb);
+        }
+      }
+
       rafRef.current = requestAnimationFrame(step);
     };
 
@@ -71,7 +88,7 @@ function HorizontalMeter({ rmsDb, peakDb, floorDb = -40 }) {
       rafRef.current = null;
       lastTsRef.current = null;
     };
-  }, [floorDb]); // single RAF; reads current target via refs
+  }, [floorDb, onBarDbChange]); // single RAF; reads current target via refs
 
   // Colors (sweet spot widened to -24 dBFS; hot begins at -6 dBFS)
   const fillColor = (db) => {
@@ -218,9 +235,7 @@ const MicCheck = () => {
   const rmsAvgRef = useRef(-60);
   const lastAvgTsRef = useRef(0);
 
-  // Tips smoothing & hysteresis
-  const tipsLevelRef = useRef(-60);
-  const lastTipsTsRef = useRef(0);
+  // Tips zone (driven by displayed bar via callback)
   const tipsZoneRef = useRef('quiet'); // 'quiet' | 'green' | 'amber' | 'red'
 
   const videoRef = useRef(null);
@@ -240,36 +255,7 @@ const MicCheck = () => {
     }
   };
 
-  const updateTips = useCallback((instantDb, nowTs) => {
-    // Fast EWMA (~300ms) + hysteresis ±1.5 dB to avoid flicker
-    const TIPS_TAU = 0.30;
-    const dt = (nowTs - (lastTipsTsRef.current || nowTs)) / 1000;
-    lastTipsTsRef.current = nowTs;
-    const alpha = 1 - Math.exp(-((dt || 0.016) / TIPS_TAU));
-    const nextLevel = tipsLevelRef.current + (instantDb - tipsLevelRef.current) * alpha;
-    tipsLevelRef.current = nextLevel;
-
-    const HYS = 1.5;
-    const last = tipsZoneRef.current;
-    let next = last;
-    const toGreen = () => (nextLevel >= -24 + HYS);
-    const toAmber = () => (nextLevel >= -6 + HYS);
-    const toRed   = () => (nextLevel >= 0 + HYS);
-    const backToAmber = () => (nextLevel <= 0 - HYS);
-    const backToGreen = () => (nextLevel <= -6 - HYS);
-    const backToQuiet = () => (nextLevel <= -24 - HYS);
-
-    if (last === 'quiet') { if (toGreen()) next = 'green'; }
-    else if (last === 'green') { if (toAmber()) next = 'amber'; else if (backToQuiet()) next = 'quiet'; }
-    else if (last === 'amber') { if (toRed()) next = 'red'; else if (backToGreen()) next = 'green'; }
-    else if (last === 'red') { if (backToAmber()) next = 'amber'; }
-
-    if (next !== last) {
-      tipsZoneRef.current = next;
-      setFeedback(zoneMessage(next));
-    }
-  }, []);
-
+  
   /** ================ AUDIO METER LOOP (fallback analyser) ================ */
   const analyzeAudio = useCallback(() => {
     const analyser = analyserRef.current;
@@ -305,15 +291,13 @@ const MicCheck = () => {
       const now = performance.now();
       const dt = (now - (lastAvgTsRef.current || now)) / 1000;
       lastAvgTsRef.current = now;
-      const AVG_TAU = 1.2; // seconds
+      const AVG_TAU = 2.0; // seconds
       const alphaAvg = 1 - Math.exp(-(dt || 0.016) / AVG_TAU);
       const newAvg = rmsAvgRef.current + (clampedDb - rmsAvgRef.current) * alphaAvg;
       rmsAvgRef.current = newAvg;
       setRmsAvgDb(newAvg);
 
-      // Tips: fast smooth + hysteresis
-      updateTips(clampedDb, now);
-
+      
       // Max since reset (fallback)
       if (clampedDb > maxPeakRef.current) {
         maxPeakRef.current = clampedDb;
@@ -334,7 +318,7 @@ const MicCheck = () => {
     }
 
     animationFrameRef.current = requestAnimationFrame(analyzeAudio);
-  }, [updateTips]);
+  }, []);
 
   // ---------- AUDIO ----------
   const startAudioAnalysis = useCallback(async () => {
@@ -374,15 +358,13 @@ const MicCheck = () => {
           // Display RMS average (slower — ~1.2s)
           const dt = (now - (lastAvgTsRef.current || now)) / 1000;
           lastAvgTsRef.current = now;
-          const AVG_TAU = 1.2;
+          const AVG_TAU = 2.0;
           const alphaAvg = 1 - Math.exp(-(dt || 0.016) / AVG_TAU);
           const newAvg = rmsAvgRef.current + (rmsDb - rmsAvgRef.current) * alphaAvg;
           rmsAvgRef.current = newAvg;
           setRmsAvgDb(newAvg);
 
-          // Tips
-          updateTips(rmsDb, now);
-
+          
           // Peak: show held line from worklet
           const floor = -60;
           const holdTime = 1500; // ms (internal visual hold)
@@ -418,7 +400,7 @@ const MicCheck = () => {
       console.error('Error accessing microphone:', error);
       setFeedback("❌ Couldn't access your microphone. Please check permissions.");
     }
-  }, [selectedAudioDevice, analyzeAudio, updateTips]);
+  }, [selectedAudioDevice, analyzeAudio]);
 
   const stopAudioAnalysis = useCallback(() => {
     if (animationFrameRef.current) {
@@ -445,7 +427,6 @@ const MicCheck = () => {
     setPeakLevel(-60);
     setPeakNumberDb(-60);
     rmsAvgRef.current = -60;
-    tipsLevelRef.current = -60;
     tipsZoneRef.current = 'quiet';
     setFeedback("Click 'Start Audio Test' to check your microphone");
   }, []);
@@ -618,6 +599,36 @@ const MicCheck = () => {
   }, [stopAudioAnalysis, stopVideoAnalysis]);
 
   // ---------- UI ----------
+  // bar display callback -> tips
+  const [barDispDb, setBarDispDb] = useState(-60);
+  const handleBarDb = useCallback((db) => { setBarDispDb(db); }, []);
+
+  // Tips follow the displayed bar with light hysteresis so they match color zones exactly
+  useEffect(() => {
+    const HYS = 1.0; // dB hysteresis
+    const last = tipsZoneRef.current;
+    let next = last;
+    const v = barDispDb;
+    const toGreen = v >= -24 + HYS;
+    const toAmber = v >= -6 + HYS;
+    const toRed   = v >= 0 + HYS;
+    const backToAmber = v <= 0 - HYS;
+    const backToGreen = v <= -6 - HYS;
+    const backToQuiet = v <= -24 - HYS;
+
+    if (last === 'quiet') { if (toGreen) next = 'green'; }
+    else if (last === 'green') { if (toAmber) next = 'amber'; else if (backToQuiet) next = 'quiet'; }
+    else if (last === 'amber') { if (toRed) next = 'red'; else if (backToGreen) next = 'green'; }
+    else if (last === 'red') { if (backToAmber) next = 'amber'; }
+
+    if (next !== last) {
+      tipsZoneRef.current = next;
+      setFeedback(next === 'red' ? '🔴 Clipping detected! Lower your gain or back away from the mic'
+        : next === 'amber' ? '🟠 Getting hot - try lowering your gain a bit'
+        : next === 'green' ? "🟢 In the sweet spot — you're ready to record"
+        : '🔇 Very quiet - check mic and gain settings');
+    }
+  }, [barDispDb]);
   const barDb = audioLevel;   // RMS drives the bar
   const meterFloor = -40;     // more travel for RMS
 
@@ -686,7 +697,7 @@ const MicCheck = () => {
 
             {/* Meter */}
             <div className="mt-6">
-              <HorizontalMeter rmsDb={barDb} peakDb={peakLevel} floorDb={meterFloor} />
+              <HorizontalMeter rmsDb={barDb} peakDb={peakLevel} floorDb={meterFloor} onBarDbChange={handleBarDb} />
 
               {/* Max (reset) — below meter, right-aligned */}
               <div className="mt-1 flex justify-end">
