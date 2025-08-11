@@ -1,8 +1,8 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { Mic, MicOff, Video, VideoOff, Play, Square, Download, Circle, Mail } from 'lucide-react';
 
-/** ======= Horizontal meter (instant bar, peak line + fast fall) ======= */
-function HorizontalMeter({ rmsDb, peakDb, floorDb = -60 }) {
+/** ======= Horizontal meter (VU-like smooth bar + responsive peak line) ======= */
+function HorizontalMeter({ rmsDb, peakDb, floorDb = -40 }) {
   // Map [floorDb..0] dBFS -> [0..1]
   const norm = (db) => {
     const span = 0 - floorDb;
@@ -13,63 +13,51 @@ function HorizontalMeter({ rmsDb, peakDb, floorDb = -60 }) {
   const targetPctRef = useRef(0);
   targetPctRef.current = norm(rmsDb) * 100;
 
-  // Displayed bar (fast, smooth — but won’t collapse unless near silence)
+  // Displayed bar (smooth, VU-like)
   const [dispPct, setDispPct] = useState(0);
   const dispPctRef = useRef(0);
 
-  // Peak line (independent hold+fall)
+  // Peak line (fast, hold, quick fall)
   const [peakLinePct, setPeakLinePct] = useState(0);
   const lastPeakHoldTsRef = useRef(0);
 
-  // Animation
   const rafRef = useRef(null);
   const lastTsRef = useRef(null);
 
   useEffect(() => {
-    // tuning — faster & snappier
-    const BAR_ATTACK_PER_SEC = 120;
-    const BAR_RELEASE_PER_SEC = 80;
-    const SILENCE_THRESHOLD_DB = floorDb + 2;
-    const PEAK_HOLD_MS = 500;
-    const PEAK_FALL_PER_SEC = 160;
+    // Ballistics — close to classic VU feel
+    const ATTACK_TAU = 0.30;    // seconds to ~63% (rise)
+    const RELEASE_TAU = 0.45;   // seconds to ~63% (fall)
+    const PEAK_HOLD_MS = 600;   // hold peak ~0.6s
+    const PEAK_FALL_PER_SEC = 220; // fast fall of peak line
 
     const step = (ts) => {
       const lastTs = lastTsRef.current ?? ts;
       const dt = Math.min(0.05, (ts - lastTs) / 1000);
       lastTsRef.current = ts;
 
-      const target = targetPctRef.current;
+      const fastPct = targetPctRef.current; // instantaneous target (0..100)
 
-      // ----- BAR (dispPct) -----
-      let newDispForThisFrame = dispPctRef.current;
+      // ----- BAR (dispPct) — exponential smoothing -----
       setDispPct((prev) => {
-        const rising = target > prev;
-        const rate = rising ? BAR_ATTACK_PER_SEC : BAR_RELEASE_PER_SEC;
-
-        // Prevent the bar from collapsing to zero unless basically silent
-        const minClamp = rmsDb < SILENCE_THRESHOLD_DB ? 0 : Math.min(prev, target);
-        const effectiveTarget = Math.max(target, minClamp);
-
-        const alpha = 1 - Math.exp(-rate * dt);
-        const next = prev + (effectiveTarget - prev) * alpha;
-        newDispForThisFrame = next;
+        const rising = fastPct > prev;
+        const tau = rising ? ATTACK_TAU : RELEASE_TAU;
+        const alpha = 1 - Math.exp(-((dt || 0.016) / tau));
+        const next = prev + (fastPct - prev) * alpha;
         dispPctRef.current = next;
         return next;
       });
 
-      // ----- PEAK LINE -----
+      // ----- PEAK LINE — jump to fast target, hold, then fall toward the bar -----
       setPeakLinePct((prev) => {
         let next = prev;
-        // Rise instantly with the bar
-        if (newDispForThisFrame > prev) {
-          next = newDispForThisFrame;
+        if (fastPct > prev) {
+          next = fastPct; // instant rise on peaks
           lastPeakHoldTsRef.current = ts;
-        } else {
-          // After hold period, fall quickly toward bar
-          if (ts - lastPeakHoldTsRef.current > PEAK_HOLD_MS) {
-            const fallAlpha = 1 - Math.exp(-PEAK_FALL_PER_SEC * dt);
-            next = prev + (newDispForThisFrame - prev) * fallAlpha;
-          }
+        } else if (ts - lastPeakHoldTsRef.current > PEAK_HOLD_MS) {
+          const bar = dispPctRef.current;
+          const fallAlpha = 1 - Math.exp(-PEAK_FALL_PER_SEC * dt);
+          next = prev + (bar - prev) * fallAlpha;
         }
         return next;
       });
@@ -101,7 +89,7 @@ function HorizontalMeter({ rmsDb, peakDb, floorDb = -60 }) {
   ];
 
   const ticks = [-60, -48, -36, -30, -24, -18, -12, -6, -3, 0];
-  const specialUp = new Set([-24, -6]); // labels above the line
+  const specialUp = new Set([-24, -6]);
 
   return (
     <div className="w-full">
@@ -192,9 +180,9 @@ function HorizontalMeter({ rmsDb, peakDb, floorDb = -60 }) {
 const MicCheck = () => {
   // ---------- State ----------
   const [isListening, setIsListening] = useState(false);
-  const [audioLevel, setAudioLevel] = useState(-60); // fast RMS (bar)
-  const [rmsAvgDb, setRmsAvgDb] = useState(-60);     // 0.5s averaged RMS (display)
-  const [peakLevel, setPeakLevel] = useState(-60);   // instantaneous/held peak line number
+  const [audioLevel, setAudioLevel] = useState(-60); // fast RMS (bar input)
+  const [rmsAvgDb, setRmsAvgDb] = useState(-60);     // averaged RMS (display)
+  const [peakLevel, setPeakLevel] = useState(-60);   // peak/held line number
   const [feedback, setFeedback] = useState("Click 'Start Audio Test' to check your microphone");
   const [audioDevices, setAudioDevices] = useState([]);
   const [videoDevices, setVideoDevices] = useState([]);
@@ -242,49 +230,39 @@ const MicCheck = () => {
   const mediaRecorderRef = useRef(null);
   const recordingTimerRef = useRef(null);
 
-  // ---------- Helpers ----------
+  // ---------- Tips helpers ----------
   const zoneMessage = (zone) => {
     switch (zone) {
-      case 'red':   return "🔴 Clipping detected! Lower your gain or back away from the mic";
-      case 'amber': return "🟠 Getting hot - try lowering your gain a bit";
+      case 'red':   return '🔴 Clipping detected! Lower your gain or back away from the mic';
+      case 'amber': return '🟠 Getting hot - try lowering your gain a bit';
       case 'green': return "🟢 In the sweet spot — you're ready to record";
-      default:      return "🔇 Very quiet - check mic and gain settings";
+      default:      return '🔇 Very quiet - check mic and gain settings';
     }
   };
 
   const updateTips = useCallback((instantDb, nowTs) => {
-    // Fast EWMA (~250ms)
-    const TIPS_TAU = 0.25;
+    // Fast EWMA (~300ms) + hysteresis ±1.5 dB to avoid flicker
+    const TIPS_TAU = 0.30;
     const dt = (nowTs - (lastTipsTsRef.current || nowTs)) / 1000;
     lastTipsTsRef.current = nowTs;
     const alpha = 1 - Math.exp(-((dt || 0.016) / TIPS_TAU));
     const nextLevel = tipsLevelRef.current + (instantDb - tipsLevelRef.current) * alpha;
     tipsLevelRef.current = nextLevel;
 
-    // Hysteresis (±1 dB around boundaries)
-    const HYS = 1;
+    const HYS = 1.5;
     const last = tipsZoneRef.current;
     let next = last;
-
     const toGreen = () => (nextLevel >= -24 + HYS);
     const toAmber = () => (nextLevel >= -6 + HYS);
     const toRed   = () => (nextLevel >= 0 + HYS);
-
     const backToAmber = () => (nextLevel <= 0 - HYS);
     const backToGreen = () => (nextLevel <= -6 - HYS);
     const backToQuiet = () => (nextLevel <= -24 - HYS);
 
-    if (last === 'quiet') {
-      if (toGreen()) next = 'green';
-    } else if (last === 'green') {
-      if (toAmber()) next = 'amber';
-      else if (backToQuiet()) next = 'quiet';
-    } else if (last === 'amber') {
-      if (toRed()) next = 'red';
-      else if (backToGreen()) next = 'green';
-    } else if (last === 'red') {
-      if (backToAmber()) next = 'amber';
-    }
+    if (last === 'quiet') { if (toGreen()) next = 'green'; }
+    else if (last === 'green') { if (toAmber()) next = 'amber'; else if (backToQuiet()) next = 'quiet'; }
+    else if (last === 'amber') { if (toRed()) next = 'red'; else if (backToGreen()) next = 'green'; }
+    else if (last === 'red') { if (backToAmber()) next = 'amber'; }
 
     if (next !== last) {
       tipsZoneRef.current = next;
@@ -292,48 +270,57 @@ const MicCheck = () => {
     }
   }, []);
 
-  /** ================ AUDIO METER LOOP (stable + safe) ================ */
+  /** ================ AUDIO METER LOOP (fallback analyser) ================ */
   const analyzeAudio = useCallback(() => {
     const analyser = analyserRef.current;
     if (!analyser) return;
 
     try {
-      const binCount = analyser.frequencyBinCount || 1024;
-      const dataArray = new Uint8Array(binCount);
-      analyser.getByteFrequencyData(dataArray);
+      const fftSize = analyser.fftSize || 2048;
+      // Prefer float time-domain ([-1..1]) for accurate RMS
+      let timeData;
+      if (analyser.getFloatTimeDomainData) {
+        timeData = new Float32Array(fftSize);
+        analyser.getFloatTimeDomainData(timeData);
+      } else {
+        const byteData = new Uint8Array(fftSize);
+        analyser.getByteTimeDomainData(byteData);
+        timeData = new Float32Array(fftSize);
+        for (let i = 0; i < fftSize; i++) timeData[i] = (byteData[i] - 128) / 128; // to [-1,1]
+      }
 
       let sum = 0;
-      for (let i = 0; i < dataArray.length; i++) {
-        const normalized = dataArray[i] / 255;
-        sum += normalized * normalized;
+      for (let i = 0; i < timeData.length; i++) {
+        const v = timeData[i];
+        sum += v * v;
       }
-      const rms = Math.sqrt(sum / dataArray.length);
+      const rms = Math.sqrt(sum / timeData.length);
       const db = rms > 0 ? 20 * Math.log10(rms) : -60;
       const clampedDb = Math.max(db, -60);
 
-      // Fast RMS for the bar
+      // Feed the bar (instant input; bar smooths it)
       setAudioLevel(clampedDb);
 
-      // Slow RMS display (EWMA ~0.5s)
+      // Display RMS average (slower — ~1.2s)
       const now = performance.now();
       const dt = (now - (lastAvgTsRef.current || now)) / 1000;
       lastAvgTsRef.current = now;
-      const AVG_TAU = 0.5;
+      const AVG_TAU = 1.2; // seconds
       const alphaAvg = 1 - Math.exp(-(dt || 0.016) / AVG_TAU);
       const newAvg = rmsAvgRef.current + (clampedDb - rmsAvgRef.current) * alphaAvg;
       rmsAvgRef.current = newAvg;
       setRmsAvgDb(newAvg);
 
-      // Tips: fast smoothing + hysteresis
+      // Tips: fast smooth + hysteresis
       updateTips(clampedDb, now);
 
-      // Update numeric Max (since last reset)
+      // Max since reset (fallback)
       if (clampedDb > maxPeakRef.current) {
         maxPeakRef.current = clampedDb;
         setPeakNumberDb(clampedDb);
       }
 
-      // Peak line numeric (fallback)
+      // Peak (fallback: use instantaneous)
       setPeakLevel(clampedDb);
     } catch (err) {
       console.error('Audio analysis failed:', err);
@@ -342,7 +329,7 @@ const MicCheck = () => {
         animationFrameRef.current = null;
       }
       analyserRef.current = null;
-      setFeedback("❌ Audio analysis error. Try stopping and starting again, or check mic permissions.");
+      setFeedback('❌ Audio analysis error. Try stopping and starting again, or check mic permissions.');
       return;
     }
 
@@ -352,8 +339,6 @@ const MicCheck = () => {
   // ---------- AUDIO ----------
   const startAudioAnalysis = useCallback(async () => {
     try {
-      setPeakLevel(-60);
-
       const constraints = {
         audio: {
           echoCancellation: false,
@@ -371,7 +356,7 @@ const MicCheck = () => {
       await ctx.resume();
       const source = ctx.createMediaStreamSource(stream);
 
-      // Optional worklet
+      // Optional worklet (preferred)
       try {
         await ctx.audioWorklet.addModule('/worklets/meter-processor.js');
         workletNodeRef.current = new AudioWorkletNode(ctx, 'meter-processor', {
@@ -381,31 +366,25 @@ const MicCheck = () => {
         source.connect(workletNodeRef.current);
         workletNodeRef.current.port.onmessage = (e) => {
           const { rmsDb, peakDb } = e.data;
-          const floor = -60;
-
           const now = performance.now();
-          const dt = (now - (lastTsRef.current || now)) / 1000;
-          lastTsRef.current = now;
 
-          // Fast-ish RMS for the bar/logic
-          const releasePerSec = 120; // slightly faster decay to feel responsive
-          const current = audioLevelRef.current ?? floor;
-          const target = Math.max(rmsDb, floor);
-          const next = target > current ? target : Math.max(target, current - releasePerSec * dt);
-          audioLevelRef.current = next;
-          setAudioLevel(next);
+          // Feed bar with worklet RMS directly; meter smooths it to VU feel
+          setAudioLevel(rmsDb);
 
-          // Slow RMS (display)
-          const AVG_TAU = 0.5;
+          // Display RMS average (slower — ~1.2s)
+          const dt = (now - (lastAvgTsRef.current || now)) / 1000;
+          lastAvgTsRef.current = now;
+          const AVG_TAU = 1.2;
           const alphaAvg = 1 - Math.exp(-(dt || 0.016) / AVG_TAU);
-          const newAvg = rmsAvgRef.current + (next - rmsAvgRef.current) * alphaAvg;
+          const newAvg = rmsAvgRef.current + (rmsDb - rmsAvgRef.current) * alphaAvg;
           rmsAvgRef.current = newAvg;
           setRmsAvgDb(newAvg);
 
           // Tips
-          updateTips(next, now);
+          updateTips(rmsDb, now);
 
-          // Peak line from worklet
+          // Peak: show held line from worklet
+          const floor = -60;
           const holdTime = 1500; // ms (internal visual hold)
           const prev = peakHoldStateRef.current?.value ?? floor;
           const prevTs = peakHoldStateRef.current?.ts ?? 0;
@@ -424,19 +403,17 @@ const MicCheck = () => {
         console.warn('AudioWorklet init failed', err);
       }
 
-      // Analyser fallback
+      // Analyser fallback for RMS if worklet not available
       analyserRef.current = ctx.createAnalyser();
-      analyserRef.current.fftSize = 1024;
-      analyserRef.current.smoothingTimeConstant = 0.0;
+      analyserRef.current.fftSize = 2048;
+      analyserRef.current.smoothingTimeConstant = 0.0; // we do our own smoothing
       source.connect(analyserRef.current);
 
-      // Start loop
       setIsListening(true);
-      analyzeAudio();
-
-      // Initial tips zone message (avoid stale default)
+      // Initial tips
       tipsZoneRef.current = 'quiet';
-      setFeedback("🔇 Very quiet - check mic and gain settings");
+      setFeedback(zoneMessage('quiet'));
+      analyzeAudio();
     } catch (error) {
       console.error('Error accessing microphone:', error);
       setFeedback("❌ Couldn't access your microphone. Please check permissions.");
@@ -449,10 +426,7 @@ const MicCheck = () => {
       animationFrameRef.current = null;
     }
     if (workletNodeRef.current) {
-      try {
-        workletNodeRef.current.port.onmessage = null;
-        workletNodeRef.current.disconnect();
-      } catch {}
+      try { workletNodeRef.current.port.onmessage = null; workletNodeRef.current.disconnect(); } catch {}
       workletNodeRef.current = null;
     }
     if (mediaStreamRef.current) {
@@ -504,7 +478,7 @@ const MicCheck = () => {
 
       const el = videoRef.current;
       if (!el) {
-        setVideoFeedback("❌ Video element not found.");
+        setVideoFeedback('❌ Video element not found.');
         return;
       }
       el.autoplay = true;
@@ -515,11 +489,7 @@ const MicCheck = () => {
 
       let played = false;
       const tryPlay = async () => {
-        try {
-          await el.play();
-          played = true;
-          setTimeout(() => analyzeVideo(), 120);
-        } catch {}
+        try { await el.play(); played = true; setTimeout(() => analyzeVideo(), 120); } catch {}
       };
       await tryPlay();
       setTimeout(() => { if (!played) tryPlay(); analyzeVideo(); }, 400);
@@ -534,33 +504,24 @@ const MicCheck = () => {
     if (!isVideoEnabled) return;
 
     const el = videoRef.current;
-    if (!el || !el.srcObject) {
-      videoAnalysisRef.current = requestAnimationFrame(analyzeVideo);
-      return;
-    }
-    if (el.readyState < 2) {
-      videoAnalysisRef.current = requestAnimationFrame(analyzeVideo);
-      return;
-    }
+    if (!el || !el.srcObject) { videoAnalysisRef.current = requestAnimationFrame(analyzeVideo); return; }
+    if (el.readyState < 2) { videoAnalysisRef.current = requestAnimationFrame(analyzeVideo); return; }
 
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    canvas.width = 160;
-    canvas.height = 120;
+    canvas.width = 160; canvas.height = 120;
 
     try {
       ctx.drawImage(el, 0, 0, canvas.width, canvas.height);
       const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
 
       let total = 0;
-      for (let i = 0; i < data.length; i += 4) {
-        total += (data[i] + data[i + 1] + data[i + 2]) / 3;
-      }
+      for (let i = 0; i < data.length; i += 4) total += (data[i] + data[i + 1] + data[i + 2]) / 3;
       const avg = total / (data.length / 4);
       setHasVideoFrame(true);
-      setVideoFeedback(avg < 50 ? "💡 Too dark - try facing a window or adding front lighting"
-        : avg > 200 ? "☀️ Too bright - reduce lighting or move away from bright backgrounds"
-        : "✅ Good lighting and framing!");
+      setVideoFeedback(avg < 50 ? '💡 Too dark - try facing a window or adding front lighting'
+        : avg > 200 ? '☀️ Too bright - reduce lighting or move away from bright backgrounds'
+        : '✅ Good lighting and framing!');
     } catch (err) {
       console.warn('Video analysis draw failed:', err?.name || err);
     }
@@ -571,32 +532,19 @@ const MicCheck = () => {
   const stopVideoAnalysis = useCallback(() => {
     setIsVideoEnabled(false);
     setHasVideoFrame(false);
-    if (videoAnalysisRef.current) {
-      cancelAnimationFrame(videoAnalysisRef.current);
-      videoAnalysisRef.current = null;
-    }
+    if (videoAnalysisRef.current) { cancelAnimationFrame(videoAnalysisRef.current); videoAnalysisRef.current = null; }
     try {
-      if (videoStreamRef.current) {
-        videoStreamRef.current.getTracks().forEach((t) => t.stop());
-        videoStreamRef.current = null;
-      }
+      if (videoStreamRef.current) { videoStreamRef.current.getTracks().forEach((t) => t.stop()); videoStreamRef.current = null; }
     } catch {}
     if (videoRef.current) {
-      try {
-        videoRef.current.pause();
-        videoRef.current.removeAttribute('src');
-        videoRef.current.srcObject = null;
-        videoRef.current.load();
-      } catch {}
+      try { videoRef.current.pause(); videoRef.current.removeAttribute('src'); videoRef.current.srcObject = null; videoRef.current.load(); } catch {}
     }
-    setVideoFeedback("Click 'Start Video' to check your camera");
+    setVideoFeedback('Click ‘Start Video’ to check your camera');
   }, []);
 
   // ---------- RECORDING ----------
   const startRecording = async () => {
-    if (!mediaStreamRef.current) {
-      await startAudioAnalysis();
-    }
+    if (!mediaStreamRef.current) { await startAudioAnalysis(); }
     try {
       mediaRecorderRef.current = new MediaRecorder(mediaStreamRef.current, { mimeType: 'audio/webm' });
       const chunks = [];
@@ -609,9 +557,7 @@ const MicCheck = () => {
       mediaRecorderRef.current.start();
       setIsRecording(true);
       setRecordingTime(0);
-      recordingTimerRef.current = setInterval(() => {
-        setRecordingTime((prev) => prev + 0.1);
-      }, 100);
+      recordingTimerRef.current = setInterval(() => { setRecordingTime((prev) => prev + 0.1); }, 100);
     } catch (error) {
       console.error('Error starting recording:', error);
       setFeedback('❌ Recording failed. Please try again.');
@@ -655,9 +601,7 @@ const MicCheck = () => {
         setVideoDevices(videoInputs);
         if (audioInputs.length > 0 && !selectedAudioDevice) setSelectedAudioDevice(audioInputs[0].deviceId);
         if (videoInputs.length > 0 && !selectedVideoDevice) setSelectedVideoDevice(videoInputs[0].deviceId);
-      } catch (error) {
-        console.error('Error getting devices:', error);
-      }
+      } catch (error) { console.error('Error getting devices:', error); }
     };
     getDevices();
     navigator.mediaDevices.addEventListener('devicechange', getDevices);
@@ -677,7 +621,6 @@ const MicCheck = () => {
   const barDb = audioLevel;   // RMS drives the bar
   const meterFloor = -40;     // more travel for RMS
 
-  // Little helper for fixed-width numeric tokens (prevents layout shift)
   const FixedNum = ({ value }) => (
     <span className="font-mono tabular-nums inline-block w-[6ch] text-right">{value}</span>
   );
@@ -762,10 +705,7 @@ const MicCheck = () => {
                 <span className="text-slate-300/90">
                   RMS (avg): <FixedNum value={rmsAvgDb.toFixed(1)} /> dB
                 </span>
-                <span
-                  className="inline-flex items-center gap-1 px-2 py-1 rounded border"
-                  style={{ borderColor: '#cbd5e1', color: '#e2e8f0' }}
-                >
+                <span className="inline-flex items-center gap-1 px-2 py-1 rounded border border-slate-600 text-slate-200">
                   Peak: <FixedNum value={peakLevel.toFixed(1)} /> dB
                 </span>
               </div>
