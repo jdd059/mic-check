@@ -2,15 +2,15 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { Mic, MicOff, Video, VideoOff, Play, Square, Download, Circle, Mail } from 'lucide-react';
 
 /** UI calibration: shift the meter display without touching audio or numbers */
-const DISPLAY_TRIM_DB = 0; // try +2 to match Logic if needed
+const DISPLAY_TRIM_DB = 0; // try +2 if you want to match Logic visually
 
 /** ======= Horizontal meter (VU-like smooth bar + responsive peak line) ======= */
 function HorizontalMeter({ rmsDb, peakDb, floorDb = -40, onBarDbChange }) {
-  // Map dB to percent width
-  const dbToPct = (db) => {
+  // Map dB to percent width (stable fn so ESLint is happy)
+  const dbToPct = useCallback((db) => {
     const span = 0 - floorDb;
     return Math.max(0, Math.min(100, ((db - floorDb) / span) * 100));
-  };
+  }, [floorDb]);
 
   // latest input dB from parent, kept in a ref so RAF doesn't re-init
   const inputDbRef = React.useRef(floorDb);
@@ -29,7 +29,7 @@ function HorizontalMeter({ rmsDb, peakDb, floorDb = -40, onBarDbChange }) {
   const lastSentDbRef = React.useRef(floorDb);
   const lastSentTsRef = React.useRef(0);
 
-  React.useEffect(() => {
+  useEffect(() => {
     // VU-like ballistics in dB (natural feel)
     const ATTACK_TAU = 0.25;    // rise ~250 ms
     const RELEASE_TAU = 0.80;   // fall ~800 ms (hangs like Logic)
@@ -106,7 +106,7 @@ function HorizontalMeter({ rmsDb, peakDb, floorDb = -40, onBarDbChange }) {
       rafRef.current = null;
       lastTsRef.current = 0;
     };
-  }, [floorDb, onBarDbChange]);
+  }, [dbToPct, floorDb, onBarDbChange]);
 
   // Background zones keep the –24/–6 sweet spot guidance
   const bgZones = [
@@ -114,7 +114,7 @@ function HorizontalMeter({ rmsDb, peakDb, floorDb = -40, onBarDbChange }) {
     { from: -24, to: -6,  color: 'rgba(34,197,94,0.20)'  },  // sweet spot
     { from: -6,  to: 0,   color: 'rgba(245,158,11,0.28)' },  // hot
   ];
-  const ticks = [-60, -48, -36, -30, -24, -18, -12, -6, -3, 0]; // ruler only
+  const ticks = [-60, -48, -36, -30, -24, -18, -12, -6, -3, 0]; // ruler only (no in-bar guides)
 
   const dispPct = dbToPct(dispDb);
   const yellowStartPct = dbToPct(-10);
@@ -544,8 +544,6 @@ const MicCheck = () => {
   }, []);
 
   // ---------- UI ----------
-  const meterFloor = -40;    // more travel for RMS
-  const barDb = audioLevel;  // RMS drives the bar; meter smooths it in dB
 
   // displayed-bar callback → tips
   const [barDispDb, setBarDispDb] = useState(-60);
