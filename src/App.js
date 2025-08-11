@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { Mic, MicOff, Video, VideoOff, Play, Square, Download, Circle, Mail } from 'lucide-react';
 
 /** UI calibration: shift the meter display without touching audio or numbers */
-const DISPLAY_TRIM_DB = 0; // try +2 to match your Logic screenshot
+const DISPLAY_TRIM_DB = 0; // try +2 to match Logic if needed
 
 /** ======= Horizontal meter (VU-like smooth bar + responsive peak line) ======= */
 function HorizontalMeter({ rmsDb, peakDb, floorDb = -40, onBarDbChange }) {
@@ -37,6 +37,7 @@ function HorizontalMeter({ rmsDb, peakDb, floorDb = -40, onBarDbChange }) {
     const PEAK_HOLD_MS = 600;
     const PEAK_FALL_PER_SEC = 220; // fast fall of peak line toward bar
     const DEADBAND_DB = 0.3;    // ignore sub-dB flutter
+    const CATCH_DB = 8;         // snap-to-target when rise >= 8 dB
 
     const step = (ts) => {
       const lastTs = lastTsRef.current || ts;
@@ -53,10 +54,20 @@ function HorizontalMeter({ rmsDb, peakDb, floorDb = -40, onBarDbChange }) {
       if (Math.abs(deltaDb) < DEADBAND_DB) deltaDb = 0;
 
       const rising = deltaDb > 0;
-      const bigTransient = rising && deltaDb > 6; // >6 dB jump → “snap” quicker
-      const tau = rising ? (bigTransient ? TRANSIENT_TAU : ATTACK_TAU) : RELEASE_TAU;
-      const alpha = 1 - Math.exp(-((dt || 0.016) / tau));
-      const nextDb = prevDb + deltaDb * alpha;
+      const bigTransient = rising && deltaDb >= CATCH_DB;
+
+      let nextDb;
+      if (bigTransient) {
+        // hard catch so the bar meets the peak line
+        nextDb = targetDb;
+      } else {
+        const tau = rising ? (deltaDb > 6 ? TRANSIENT_TAU : ATTACK_TAU) : RELEASE_TAU;
+        const alpha = 1 - Math.exp(-((dt || 0.016) / tau));
+        nextDb = prevDb + deltaDb * alpha;
+
+        // if we’re within 0.5 dB of target, finish the catch
+        if (rising && (targetDb - nextDb) < 0.5) nextDb = targetDb;
+      }
 
       dispDbRef.current = nextDb;
       setDispDb(nextDb);
@@ -64,16 +75,16 @@ function HorizontalMeter({ rmsDb, peakDb, floorDb = -40, onBarDbChange }) {
       // Peak line: instant rise on fast target; hold; then fall toward the bar
       const fastPct = dbToPct(targetDb);
       setPeakLinePct((prev) => {
-        let next = prev;
+        let p = prev;
         if (fastPct > prev) {
-          next = fastPct;
+          p = fastPct;
           lastPeakHoldTsRef.current = ts;
         } else if (ts - lastPeakHoldTsRef.current > PEAK_HOLD_MS) {
           const barPct = dbToPct(dispDbRef.current);
           const fallAlpha = 1 - Math.exp(-PEAK_FALL_PER_SEC * dt);
-          next = prev + (barPct - prev) * fallAlpha;
+          p = prev + (barPct - prev) * fallAlpha;
         }
-        return next;
+        return p;
       });
 
       // Report displayed bar dB up to parent (so Tips match what users see)
@@ -103,8 +114,7 @@ function HorizontalMeter({ rmsDb, peakDb, floorDb = -40, onBarDbChange }) {
     { from: -24, to: -6,  color: 'rgba(34,197,94,0.20)'  },  // sweet spot
     { from: -6,  to: 0,   color: 'rgba(245,158,11,0.28)' },  // hot
   ];
-  const ticks = [-60, -48, -36, -30, -24, -18, -12, -10, -6, -3, 0]; // include -10 for visual reference
-  const specialUp = new Set([-24, -10, -6]);
+  const ticks = [-60, -48, -36, -30, -24, -18, -12, -6, -3, 0]; // ruler only
 
   const dispPct = dbToPct(dispDb);
   const yellowStartPct = dbToPct(-10);
@@ -117,8 +127,8 @@ function HorizontalMeter({ rmsDb, peakDb, floorDb = -40, onBarDbChange }) {
         <div className="absolute left-0 right-0 top-1/2 -translate-y-1/2 h-px bg-slate-600/60" />
         {ticks.map((db) => {
           const x = dbToPct(db);
-          const isMajor = db % 12 === 0 || specialUp.has(db) || db === 0;
-          const labelUp = specialUp.has(db);
+          const isMajor = db % 12 === 0 || db === -24 || db === -6 || db === 0;
+          const labelUp = db === -24 || db === -6;
           return (
             <div key={db} className="absolute" style={{ left: `calc(${x}% - 1px)`, top: 0 }}>
               <div
@@ -127,7 +137,7 @@ function HorizontalMeter({ rmsDb, peakDb, floorDb = -40, onBarDbChange }) {
               />
               <div
                 className={`absolute ${labelUp ? '-top-4' : 'top-4'} -translate-x-1/2 text-[11px] leading-none ${
-                  (db === -24 || db === -10 || db === -6 || db === 0) ? 'text-white font-medium' : 'text-slate-300/80'
+                  (db === -24 || db === -6 || db === 0) ? 'text-white font-medium' : 'text-slate-300/80'
                 }`}
                 style={{ whiteSpace: 'nowrap' }}
               >
@@ -155,18 +165,6 @@ function HorizontalMeter({ rmsDb, peakDb, floorDb = -40, onBarDbChange }) {
           );
         })}
 
-        {/* guides */}
-        <div
-          className="absolute top-0 bottom-0 w-[2px] bg-yellow-400/60"
-          style={{ left: `calc(${yellowStartPct}% - 1px)`, zIndex: 2 }}
-          title="-10 dB"
-        />
-        <div
-          className="absolute top-0 bottom-0 w-[2px] bg-amber-400/60"
-          style={{ left: `calc(${amberStartPct}% - 1px)`, zIndex: 2 }}
-          title="-6 dB"
-        />
-
         {/* subtle tail under fill */}
         <div
           className="absolute inset-y-0 left-0"
@@ -179,7 +177,7 @@ function HorizontalMeter({ rmsDb, peakDb, floorDb = -40, onBarDbChange }) {
           }}
         />
 
-        {/* base fill — ALWAYS green below -10 dB */}
+        {/* base fill — ALWAYS green */}
         <div
           className="absolute inset-y-0 left-0"
           style={{ width: `${dispPct}%`, backgroundColor: '#22c55e', opacity: 0.98, zIndex: 3 }}
