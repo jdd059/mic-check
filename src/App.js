@@ -1,11 +1,8 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { Mic, MicOff, Video, VideoOff, Play, Square, Download, Circle, Mail } from 'lucide-react';
-
-/** UI calibration: shift the meter display without touching audio or numbers */
-const DISPLAY_TRIM_DB = 0; // try +2 if you want to match Logic visually
+import { Mic, MicOff, Video, VideoOff, Play, Square, Download, Circle, Mail, RotateCcw } from 'lucide-react';
 
 /** ======= Horizontal meter (VU-like smooth bar + responsive peak line) ======= */
-function HorizontalMeter({ rmsDb, peakDb, floorDb = -40, onBarDbChange }) {
+function HorizontalMeter({ rmsDb, peakDb, floorDb = -40, onBarDbChange, displayTrimDb = 0 }) {
   // Map dB to percent width (stable fn so ESLint is happy)
   const dbToPct = useCallback((db) => {
     const span = 0 - floorDb;
@@ -46,7 +43,7 @@ function HorizontalMeter({ rmsDb, peakDb, floorDb = -40, onBarDbChange }) {
 
       // Apply optional display trim here (UI-only)
       const targetDbRaw = inputDbRef.current;
-      const targetDb = Math.max(targetDbRaw + DISPLAY_TRIM_DB, floorDb);
+      const targetDb = Math.max(targetDbRaw + displayTrimDb, floorDb);
 
       // Envelope in dB
       const prevDb = dispDbRef.current;
@@ -106,7 +103,7 @@ function HorizontalMeter({ rmsDb, peakDb, floorDb = -40, onBarDbChange }) {
       rafRef.current = null;
       lastTsRef.current = 0;
     };
-  }, [dbToPct, floorDb, onBarDbChange]);
+  }, [dbToPct, floorDb, onBarDbChange, displayTrimDb]);
 
   // Background zones keep the –24/–6 sweet spot guidance
   const bgZones = [
@@ -242,6 +239,18 @@ const MicCheck = () => {
   const [videoFeedback, setVideoFeedback] = useState("Click 'Start Video' to check your camera");
   const [hasVideoFrame, setHasVideoFrame] = useState(false);
 
+  // Calibrate (UI-only trim) — persisted
+  const [displayTrimDb, setDisplayTrimDb] = useState(0);
+
+  // Applied settings readout (from getSettings())
+  const [appliedSettings, setAppliedSettings] = useState({
+    echoCancellation: undefined,
+    noiseSuppression: undefined,
+    autoGainControl: undefined,
+    sampleRate: undefined,
+    channelCount: undefined,
+  });
+
   // Recording
   const [isRecording, setIsRecording] = useState(false);
   const [recordedBlob, setRecordedBlob] = useState(null);
@@ -275,6 +284,24 @@ const MicCheck = () => {
   const maxPeakRef = useRef(-60);
   const mediaRecorderRef = useRef(null);
   const recordingTimerRef = useRef(null);
+
+  // ---------- INIT CALIBRATE ----------
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem('displayTrimDb');
+      if (saved !== null) {
+        setDisplayTrimDb(parseFloat(saved));
+      } else {
+        const isMobile = /Mobi|Android/i.test(navigator.userAgent);
+        setDisplayTrimDb(isMobile ? 6 : 0); // default +6 dB on phones
+      }
+    } catch {}
+  }, []);
+
+  // persist on change
+  useEffect(() => {
+    try { localStorage.setItem('displayTrimDb', String(displayTrimDb)); } catch {}
+  }, [displayTrimDb]);
 
   /** ================ AUDIO METER LOOP (fallback analyser) ================ */
   const analyzeAudio = useCallback(() => {
@@ -353,6 +380,19 @@ const MicCheck = () => {
 
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
       mediaStreamRef.current = stream;
+
+      // capture applied getSettings()
+      try {
+        const track = stream.getAudioTracks?.()[0];
+        const s = track?.getSettings?.() || {};
+        setAppliedSettings({
+          echoCancellation: s.echoCancellation,
+          noiseSuppression: s.noiseSuppression,
+          autoGainControl: s.autoGainControl,
+          sampleRate: s.sampleRate,
+          channelCount: s.channelCount,
+        });
+      } catch {}
 
       const ctx = new (window.AudioContext || window.webkitAudioContext)();
       audioContextRef.current = ctx;
@@ -659,6 +699,12 @@ const MicCheck = () => {
     <span className="font-mono tabular-nums inline-block w-[6ch] text-right">{value}</span>
   );
 
+  const SettingBadge = ({ label, value }) => (
+    <span className={`text-xs px-2 py-1 rounded border ${value ? 'border-emerald-500/60 text-emerald-300' : 'border-slate-600 text-slate-300'}`}>
+      {label}: {value === undefined ? 'n/a' : value ? 'on' : 'off'}
+    </span>
+  );
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 to-slate-800 text-white">
       <div className="container mx-auto px-4 py-8 max-w-5xl">
@@ -693,6 +739,34 @@ const MicCheck = () => {
               </div>
             )}
 
+            {/* Calibrate (UI trim) */}
+            <div className="mt-4 p-3 rounded-lg bg-slate-700/40 border border-slate-600/60">
+              <div className="flex items-center justify-between gap-2">
+                <label className="text-sm font-medium">Calibrate (UI trim)</label>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setDisplayTrimDb(0)}
+                    className="text-xs inline-flex items-center gap-1 px-2 py-1 rounded border border-slate-600 hover:bg-slate-700"
+                    title="Reset to 0 dB"
+                  >
+                    <RotateCcw size={14} /> Reset
+                  </button>
+                  <span className="text-sm tabular-nums w-[7ch] text-right">{displayTrimDb.toFixed(1)} dB</span>
+                </div>
+              </div>
+              <input
+                type="range"
+                min={-12}
+                max={12}
+                step={0.5}
+                value={displayTrimDb}
+                onChange={(e) => setDisplayTrimDb(parseFloat(e.target.value))}
+                className="w-full mt-2"
+              />
+              <p className="mt-1 text-xs text-slate-300/80">Visual-only: shifts the meter display to match how loud you naturally speak on this device. Recording stays raw.</p>
+            </div>
+
             {/* Meter */}
             <div className="mt-6">
               <HorizontalMeter
@@ -700,10 +774,19 @@ const MicCheck = () => {
                 peakDb={peakLevel}
                 floorDb={-40}
                 onBarDbChange={setBarDispDb}
+                displayTrimDb={displayTrimDb}
               />
 
               {/* Max (reset) — below meter, right-aligned */}
-              <div className="mt-1 flex justify-end">
+              <div className="mt-1 flex justify-between items-center">
+                <div className="flex flex-wrap gap-2">
+                  <SettingBadge label="EC" value={appliedSettings.echoCancellation} />
+                  <SettingBadge label="NS" value={appliedSettings.noiseSuppression} />
+                  <SettingBadge label="AGC" value={appliedSettings.autoGainControl} />
+                  {appliedSettings.sampleRate && (
+                    <span className="text-xs px-2 py-1 rounded border border-slate-600 text-slate-300">{appliedSettings.sampleRate} Hz</span>
+                  )}
+                </div>
                 <button
                   type="button"
                   onClick={() => { maxPeakRef.current = -60; setPeakNumberDb(-60); }}
