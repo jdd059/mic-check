@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { Mic, MicOff, Video, VideoOff, Play, Square, Download, Circle, Mail, RotateCcw } from 'lucide-react';
+import { Mic, MicOff, Video, VideoOff, Play, Square, Download, Circle, Mail, RotateCcw, ChevronDown } from 'lucide-react';
 
 /** ======= Horizontal meter (VU-like smooth bar + responsive peak line) ======= */
 function HorizontalMeter({ rmsDb, peakDb, floorDb = -40, onBarDbChange, displayTrimDb = 0 }) {
@@ -242,6 +242,10 @@ const MicCheck = () => {
   // Calibrate (UI-only trim) — persisted
   const [displayTrimDb, setDisplayTrimDb] = useState(0);
 
+  // Advanced panel (hide UI-only controls + raw toggle)
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [useRawMic, setUseRawMic] = useState(false); // when true, disable OS processing
+
   // Applied settings readout (from getSettings())
   const [appliedSettings, setAppliedSettings] = useState({
     echoCancellation: undefined,
@@ -285,6 +289,8 @@ const MicCheck = () => {
   const mediaRecorderRef = useRef(null);
   const recordingTimerRef = useRef(null);
 
+  const isMobile = /Mobi|Android/i.test(navigator.userAgent);
+
   // ---------- INIT CALIBRATE ----------
   useEffect(() => {
     try {
@@ -292,16 +298,20 @@ const MicCheck = () => {
       if (saved !== null) {
         setDisplayTrimDb(parseFloat(saved));
       } else {
-        const isMobile = /Mobi|Android/i.test(navigator.userAgent);
         setDisplayTrimDb(isMobile ? 6 : 0); // default +6 dB on phones
       }
+      const savedRaw = localStorage.getItem('useRawMic');
+      if (savedRaw !== null) setUseRawMic(savedRaw === 'true');
     } catch {}
-  }, []);
+  }, [isMobile]);
 
   // persist on change
   useEffect(() => {
     try { localStorage.setItem('displayTrimDb', String(displayTrimDb)); } catch {}
   }, [displayTrimDb]);
+  useEffect(() => {
+    try { localStorage.setItem('useRawMic', String(useRawMic)); } catch {}
+  }, [useRawMic]);
 
   /** ================ AUDIO METER LOOP (fallback analyser) ================ */
   const analyzeAudio = useCallback(() => {
@@ -369,11 +379,12 @@ const MicCheck = () => {
   // ---------- AUDIO ----------
   const startAudioAnalysis = useCallback(async () => {
     try {
+      const wantProcessed = isMobile && !useRawMic; // Mobile Assist default
       const constraints = {
         audio: {
-          echoCancellation: false,
-          noiseSuppression: false,
-          autoGainControl: false,
+          echoCancellation: wantProcessed,
+          noiseSuppression: wantProcessed,
+          autoGainControl: wantProcessed,
           ...(selectedAudioDevice ? { deviceId: { exact: selectedAudioDevice } } : {})
         }
       };
@@ -399,7 +410,8 @@ const MicCheck = () => {
       await ctx.resume();
       const source = ctx.createMediaStreamSource(stream);
 
-      // Optional worklet (preferred when available)
+      // Try AudioWorklet first; fall back to analyser only if it fails
+      let workletOk = false;
       try {
         await ctx.audioWorklet.addModule('/worklets/meter-processor.js');
         workletNodeRef.current = new AudioWorkletNode(ctx, 'meter-processor', {
@@ -410,7 +422,6 @@ const MicCheck = () => {
         workletNodeRef.current.port.onmessage = (e) => {
           const { rmsDb, peakDb } = e.data;
 
-          // Feed bar with worklet RMS directly; meter smooths it in dB
           setAudioLevel(rmsDb);
 
           // Display RMS average (slower — ~2.0s)
@@ -439,28 +450,32 @@ const MicCheck = () => {
             setPeakNumberDb(peakDb);
           }
         };
+        workletOk = true;
       } catch (err) {
         console.warn('AudioWorklet init failed', err);
       }
 
-      // Analyser fallback for RMS if worklet not available
-      analyserRef.current = ctx.createAnalyser();
-      analyserRef.current.fftSize = 2048;
-      analyserRef.current.smoothingTimeConstant = 0.0; // we do our own smoothing
-      source.connect(analyserRef.current);
+      if (!workletOk) {
+        analyserRef.current = ctx.createAnalyser();
+        analyserRef.current.fftSize = 2048;
+        analyserRef.current.smoothingTimeConstant = 0.0; // we do our own smoothing
+        source.connect(analyserRef.current);
+        analyzeAudio();
+      }
 
       setIsListening(true);
 
       // Initial tips
       tipsZoneRef.current = 'quiet';
-      setFeedback('🔇 Very quiet - check mic and gain settings');
+      setFeedback(wantProcessed
+        ? '✅ Mobile Assist on: AGC/NR/EC enabled for realistic phone levels'
+        : '🔇 Very quiet - check mic and gain settings');
 
-      analyzeAudio();
     } catch (error) {
       console.error('Error accessing microphone:', error);
       setFeedback("❌ Couldn't access your microphone. Please check permissions.");
     }
-  }, [selectedAudioDevice, analyzeAudio]);
+  }, [selectedAudioDevice, analyzeAudio, isMobile, useRawMic]);
 
   const stopAudioAnalysis = useCallback(() => {
     if (animationFrameRef.current) {
@@ -580,7 +595,7 @@ const MicCheck = () => {
     if (videoRef.current) {
       try { videoRef.current.pause(); videoRef.current.removeAttribute('src'); videoRef.current.srcObject = null; videoRef.current.load(); } catch {}
     }
-    setVideoFeedback('Click ‘Start Video’ to check your camera');
+    setVideoFeedback('Click \'Start Video\' to check your camera');
   }, []);
 
   // ---------- UI ----------
@@ -623,11 +638,14 @@ const MicCheck = () => {
   const startRecording = async () => {
     if (!mediaStreamRef.current) { await startAudioAnalysis(); }
     try {
-      mediaRecorderRef.current = new MediaRecorder(mediaStreamRef.current, { mimeType: 'audio/webm' });
+      const preferred = ["audio/webm;codecs=opus","audio/webm","audio/ogg;codecs=opus","audio/ogg"]; 
+      const mimeType = preferred.find(t => window.MediaRecorder && MediaRecorder.isTypeSupported(t));
+      mediaRecorderRef.current = new MediaRecorder(mediaStreamRef.current, mimeType ? { mimeType } : {});
       const chunks = [];
       mediaRecorderRef.current.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
       mediaRecorderRef.current.onstop = () => {
-        const blob = new Blob(chunks, { type: 'audio/webm' });
+        const type = mimeType || 'audio/webm';
+        const blob = new Blob(chunks, { type });
         setRecordedBlob(blob);
         mediaRecorderRef.current = null;
       };
@@ -719,6 +737,9 @@ const MicCheck = () => {
           <div className="bg-slate-800/50 backdrop-blur rounded-2xl p-6 border border-slate-700">
             <div className="flex items-start justify-between gap-4">
               <h2 className="text-xl font-semibold">Audio</h2>
+              {isMobile && !useRawMic && (
+                <span className="text-xs px-2 py-1 rounded bg-emerald-600/20 border border-emerald-500/40 text-emerald-200">Mobile Assist</span>
+              )}
             </div>
 
             {(audioDevices.length > 1) && (
@@ -739,32 +760,49 @@ const MicCheck = () => {
               </div>
             )}
 
-            {/* Calibrate (UI trim) */}
-            <div className="mt-4 p-3 rounded-lg bg-slate-700/40 border border-slate-600/60">
-              <div className="flex items-center justify-between gap-2">
-                <label className="text-sm font-medium">Calibrate (UI trim)</label>
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setDisplayTrimDb(0)}
-                    className="text-xs inline-flex items-center gap-1 px-2 py-1 rounded border border-slate-600 hover:bg-slate-700"
-                    title="Reset to 0 dB"
-                  >
-                    <RotateCcw size={14} /> Reset
-                  </button>
-                  <span className="text-sm tabular-nums w-[7ch] text-right">{displayTrimDb.toFixed(1)} dB</span>
+            {/* Advanced (collapsed) */}
+            <div className="mt-4">
+              <button
+                type="button"
+                onClick={() => setShowAdvanced((v) => !v)}
+                className="inline-flex items-center gap-2 text-sm text-slate-200/90 hover:text-white"
+              >
+                <ChevronDown className={`transition-transform ${showAdvanced ? 'rotate-180' : ''}`} size={16} /> Advanced
+              </button>
+              {showAdvanced && (
+                <div className="mt-3 space-y-3 p-3 rounded-lg bg-slate-700/40 border border-slate-600/60">
+                  <label className="flex items-center gap-2 text-sm">
+                    <input type="checkbox" checked={useRawMic} onChange={(e) => setUseRawMic(e.target.checked)} />
+                    Use raw mic (no processing)
+                  </label>
+                  <div>
+                    <div className="flex items-center justify-between gap-2">
+                      <label className="text-sm font-medium">Calibrate (UI trim)</label>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setDisplayTrimDb(0)}
+                          className="text-xs inline-flex items-center gap-1 px-2 py-1 rounded border border-slate-600 hover:bg-slate-700"
+                          title="Reset to 0 dB"
+                        >
+                          <RotateCcw size={14} /> Reset
+                        </button>
+                        <span className="text-sm tabular-nums w-[7ch] text-right">{displayTrimDb.toFixed(1)} dB</span>
+                      </div>
+                    </div>
+                    <input
+                      type="range"
+                      min={-12}
+                      max={12}
+                      step={0.5}
+                      value={displayTrimDb}
+                      onChange={(e) => setDisplayTrimDb(parseFloat(e.target.value))}
+                      className="w-full mt-2"
+                    />
+                    <p className="mt-1 text-xs text-amber-300/80">Visual-only: shifts the meter display. It does not change your recording level.</p>
+                  </div>
                 </div>
-              </div>
-              <input
-                type="range"
-                min={-12}
-                max={12}
-                step={0.5}
-                value={displayTrimDb}
-                onChange={(e) => setDisplayTrimDb(parseFloat(e.target.value))}
-                className="w-full mt-2"
-              />
-              <p className="mt-1 text-xs text-slate-300/80">Visual-only: shifts the meter display to match how loud you naturally speak on this device. Recording stays raw.</p>
+              )}
             </div>
 
             {/* Meter */}
@@ -992,20 +1030,20 @@ const MicCheck = () => {
               <p className="text-center text-green-400">✓ We'll notify you when the Chrome extension launches!</p>
             )}
           </div>
-        </div>
 
-        <div className="text-center mt-8 text-slate-400 text-sm leading-6">
-          <div>Professional audio tools built for creators</div>
-          <div>
-            by{' '}
-            <a
-              href="https://jondeleonmedia.com"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-[#3251D5] hover:text-[#2940b8]"
-            >
-              Jon DeLeon Media
-            </a>
+          <div className="text-center mt-8 text-slate-400 text-sm leading-6">
+            <div>Professional audio tools built for creators</div>
+            <div>
+              by{' '}
+              <a
+                href="https://jondeleonmedia.com"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-[#3251D5] hover:text-[#2940b8]"
+              >
+                Jon DeLeon Media
+              </a>
+            </div>
           </div>
         </div>
       </div>
